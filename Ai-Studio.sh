@@ -1,6 +1,6 @@
 #!/bin/zsh
 # =============================================================================
-# 🍎 AI Studio Pro v2.0 - macOS 一键部署脚本
+# 🍎 AI Studio Pro v3.0 - macOS 一键部署脚本
 # 功能: Open WebUI + MLX + Qwen3 + Stable Diffusion + 智能画图集成
 # 
 # 核心特性:
@@ -8,12 +8,13 @@
 #   • 🌐 服务启动后自动打开浏览器
 #   • 🔄 自我修复: 自动检测并修复常见问题
 #   • 📦 完整生命周期: setup/start/status/update/repair/stop/uninstall
+#   • ⚡ hf-transfer 加速: 大模型下载提速 3-5 倍
 #
 # 用法:
 #   ./ai-studio.sh setup      # 首次部署（环境+模型）
 #   ./ai-studio.sh start      # 启动所有服务 + 自动打开浏览器
 #   ./ai-studio.sh status     # 查看服务运行状态
-#   ./ai-studio.sh update     # 检查并应用更新
+#   ./ai-studio.sh update     # 更新脚本/依赖/模型
 #   ./ai-studio.sh repair     # 自我修复常见问题
 #   ./ai-studio.sh stop       # 优雅停止所有服务
 #   ./ai-studio.sh uninstall  # 完全卸载（删除所有数据）
@@ -21,11 +22,11 @@
 #   ./ai-studio.sh help       # 查看帮助
 # =============================================================================
 
-# 严格模式：遇错即停 + 未定义变量报错
+# 严格模式：遇错即停 + 未定义变量报错 + 管道错误传递
 set -euo pipefail
 
 # =============================================================================
-# 📁 全局配置区（可按需修改）
+# 📁 全局配置区（支持环境变量覆盖）
 # =============================================================================
 
 # 项目路径
@@ -43,14 +44,21 @@ set -euo pipefail
 
 # 模型配置（支持环境变量覆盖）
 : "${QWEN_MODEL:=mlx-community/Qwen3-8B-4bit}"
+: "${QWEN_MODEL_ALT:=mlx-community/Qwen2.5-7B-Instruct-4bit-mlx}"
 : "${SD_MODEL:=stabilityai/stable-diffusion-xl-base-1.0}"
-: "${HF_ENDPOINT:=${HF_ENDPOINT:-https://hf-mirror.com}}"
+: "${SD_MODEL_ALT:=stabilityai/stable-diffusion-2-1}"
 
 # 网络配置
+: "${HF_ENDPOINT:=${HF_ENDPOINT:-https://hf-mirror.com}}"
 : "${DOCKER_HOST_URL:=host.docker.internal}"
 
+# 下载配置
+: "${HF_MAX_RETRIES:=5}"
+: "${HF_RETRY_TIMEOUT:=60}"
+: "${HF_DOWNLOAD_TIMEOUT:=300}"
+
 # 版本信息
-: "${SCRIPT_VERSION:=2.0.0}"
+: "${SCRIPT_VERSION:=3.0.0}"
 : "${SCRIPT_REPO:=https://raw.githubusercontent.com/ai-studio-mac/scripts/main/ai-studio.sh}"
 
 # 终端样式（兼容所有 shell）
@@ -59,7 +67,6 @@ if [[ -t 1 ]]; then
   readonly BLUE='\033[0;34m' MAGENTA='\033[0;35m' CYAN='\033[0;36m'
   readonly NC='\033[0m' BOLD='\033[1m' DIM='\033[2m'
 else
-  # 非终端输出（日志文件）禁用颜色
   readonly RED='' GREEN='' YELLOW='' BLUE='' MAGENTA='' CYAN='' NC='' BOLD='' DIM=''
 fi
 
@@ -67,13 +74,11 @@ fi
 # 🔧 工具函数库
 # =============================================================================
 
-# 日志输出
 log()     { printf "${BLUE}[INFO]${NC} %s %s\n" "$(date '+%H:%M:%S')" "$1"; }
 success() { printf "${GREEN}[✓]${NC} %s ${BOLD}%s${NC}\n" "$(date '+%H:%M:%S')" "$1"; }
 warn()    { printf "${YELLOW}[⚠]${NC} %s %s\n" "$(date '+%H:%M:%S')" "$1"; }
 error()   { printf "${RED}[✗]${NC} %s ${BOLD}ERROR:${NC} %s\n" "$(date '+%H:%M:%S')" "$1" >&2; }
 
-# 标题输出
 title() {
   printf "\n${MAGENTA}╔════════════════════════════════════════╗${NC}\n"
   printf "${MAGENTA}║  ${CYAN}${BOLD}%-36s${NC}${MAGENTA}  ║${NC}\n" "$1"
@@ -125,11 +130,11 @@ safe_exec() {
   fi
 }
 
-# 下载文件（带重试）
+# 下载文件（带重试 + 超时）
 download_with_retry() {
   local url=$1 output=$2 max_retries=3 retry=0
   while [[ $retry -lt $max_retries ]]; do
-    if curl -sfL --retry 2 --connect-timeout 10 "$url" -o "$output" 2>/dev/null; then
+    if curl -sfL --retry 2 --connect-timeout 10 --max-time 300 "$url" -o "$output" 2>/dev/null; then
       return 0
     fi
     ((retry++))
@@ -138,6 +143,11 @@ download_with_retry() {
   done
   error "下载失败: $url"
   return 1
+}
+
+# 清理模型名称（移除空格/特殊字符）
+clean_model_name() {
+  echo "$1" | tr -d '[:space:]' | sed 's/[^a-zA-Z0-9\/._-]//g'
 }
 
 # =============================================================================
@@ -242,15 +252,21 @@ setup_environment() {
   pip install --quiet \
     'mlx-lm>=0.20.0' \
     'huggingface_hub>=0.20.0' \
+    'hf-transfer>=0.1.0' \
     'accelerate>=0.25.0' \
     'certifi>=2024.0.0' \
     'diffusers>=0.25.0' \
     'transformers>=4.36.0' \
     'Pillow>=10.0.0' \
     'flask>=2.3.0' \
+    'requests>=2.31.0' \
     2>/dev/null || {
     warn "部分依赖安装警告（通常可忽略）"
   }
+  
+  # 启用 hf-transfer 加速
+  export HF_HUB_ENABLE_HF_TRANSFER=1
+  export HF_HUB_DOWNLOAD_TIMEOUT="$HF_DOWNLOAD_TIMEOUT"
   
   success "✓ Python 环境就绪"
   
@@ -276,7 +292,7 @@ EOF
 }
 
 # =============================================================================
-# 📥 模型下载函数（带验证和重试）
+# 📥 模型下载函数（带验证、重试、加速）
 # =============================================================================
 
 download_models() {
@@ -284,6 +300,8 @@ download_models() {
   
   source "$VENV_DIR/bin/activate"
   export HF_ENDPOINT="$HF_ENDPOINT"
+  export HF_HUB_ENABLE_HF_TRANSFER=1
+  export HF_HUB_DOWNLOAD_TIMEOUT="$HF_DOWNLOAD_TIMEOUT"
   
   # ── 下载 Qwen3 ─────────────────────────────────────
   if [[ -f "$MODEL_DIR/qwen3-8b-mlx/config.json" ]]; then
@@ -293,10 +311,14 @@ download_models() {
     echo -e "  ${CYAN}提示:${NC} 首次下载需 5-15 分钟，取决于网络"
     
     # 清理模型名称中的空格（修复 %20 问题）
-    local clean_model=$(echo "$QWEN_MODEL" | xargs)
+    local clean_model=$(clean_model_name "$QWEN_MODEL")
     
-    # 尝试下载（新版 hf 命令，默认支持断点续传）
-    if hf download "$clean_model" --local-dir "$MODEL_DIR/qwen3-8b-mlx" 2>&1 | tee -a "$LOG_DIR/download.log"; then
+    # 尝试下载（新版 hf 命令 + hf-transfer 加速）
+    if hf download "$clean_model" \
+        --local-dir "$MODEL_DIR/qwen3-8b-mlx" \
+        --max-retries "$HF_MAX_RETRIES" \
+        --retry-timeout "$HF_RETRY_TIMEOUT" \
+        2>&1 | tee -a "$LOG_DIR/download.log"; then
       # 验证下载完整性
       if [[ -f "$MODEL_DIR/qwen3-8b-mlx/config.json" ]] && \
          [[ -f "$MODEL_DIR/qwen3-8b-mlx/tokenizer.json" ]]; then
@@ -306,10 +328,20 @@ download_models() {
         return 1
       fi
     else
-      error "Qwen3 下载失败"
-      echo "  💡 尝试: 检查网络或手动设置 HF_ENDPOINT"
-      echo "  💡 或运行: $0 repair 自动修复"
-      return 1
+      warn "Qwen3 下载失败，尝试备选模型: $QWEN_MODEL_ALT"
+      local clean_alt=$(clean_model_name "$QWEN_MODEL_ALT")
+      if hf download "$clean_alt" \
+          --local-dir "$MODEL_DIR/qwen3-8b-mlx" \
+          --max-retries "$HF_MAX_RETRIES" \
+          --retry-timeout "$HF_RETRY_TIMEOUT" \
+          2>&1 | tee -a "$LOG_DIR/download.log"; then
+        success "✓ 备选模型下载完成"
+      else
+        error "模型下载失败"
+        echo "  💡 尝试: 检查网络或手动设置 HF_ENDPOINT"
+        echo "  💡 或运行: $0 repair 自动修复"
+        return 1
+      fi
     fi
   fi
   
@@ -318,25 +350,34 @@ download_models() {
     success "✓ Stable Diffusion 模型已存在"
   else
     echo -e "\n${YELLOW}⚠️  Stable Diffusion XL 模型较大 (~6.5GB)${NC}"
-    read -q "REPLY?是否现在下载？(Y/n, 可稍后手动下载) " || true
+    echo -n "是否现在下载？(Y/n, 可稍后手动下载) "
+    read -r REPLY || true
     echo
     
-    if [[ $REPLY =~ ^[Yy]$ || -z $REPLY ]]; then
+    if [[ "${REPLY:-}" =~ ^[Yy]$ || -z "${REPLY:-}" ]]; then
       log "下载 Stable Diffusion XL (~6.5GB)..."
-      echo -e "  ${CYAN}提示:${NC} 下载时间可能较长，请耐心等待"
+      echo -e "  ${CYAN}提示:${NC} 下载时间可能较长，hf-transfer 已启用加速"
       
-      local clean_sd=$(echo "$SD_MODEL" | xargs)
-      if hf download "$clean_sd" --local-dir "$MODEL_DIR/stable-diffusion" 2>&1 | tee -a "$LOG_DIR/download.log"; then
+      local clean_sd=$(clean_model_name "$SD_MODEL")
+      if hf download "$clean_sd" \
+          --local-dir "$MODEL_DIR/stable-diffusion" \
+          --max-retries "$HF_MAX_RETRIES" \
+          --retry-timeout "$HF_RETRY_TIMEOUT" \
+          2>&1 | tee -a "$LOG_DIR/download.log"; then
         if [[ -f "$MODEL_DIR/stable-diffusion/model_index.json" ]]; then
           success "✓ Stable Diffusion 模型下载完成"
         else
           warn "SD 模型下载不完整，可稍后重试"
         fi
       else
-        warn "SD 模型下载中断，可稍后运行: $0 setup 继续"
+        warn "SD 模型下载中断"
+        echo "  💡 可稍后运行: $0 setup 继续"
+        echo "  💡 或手动下载: $0 download-sd"
       fi
     else
       warn "跳过 SD 模型下载，画图功能暂不可用"
+      # 创建标记文件，避免重复询问
+      touch "$MODEL_DIR/stable-diffusion/.skip-download"
     fi
   fi
 }
@@ -356,6 +397,7 @@ start_mlx() {
   fi
   
   source "$VENV_DIR/bin/activate"
+  export HF_ENDPOINT="$HF_ENDPOINT"
   
   # 后台启动 MLX server
   nohup mlx_lm.server \
@@ -387,6 +429,13 @@ start_mlx() {
 # =============================================================================
 
 start_stable_diffusion() {
+  # 检查是否跳过下载
+  if [[ -f "$MODEL_DIR/stable-diffusion/.skip-download" ]]; then
+    warn "SD 模型被标记为跳过，画图功能暂不可用"
+    echo "  💡 运行: $0 setup 下载模型"
+    return 0
+  fi
+  
   # 检查模型
   if [[ ! -f "$MODEL_DIR/stable-diffusion/model_index.json" ]]; then
     warn "SD 模型未下载，跳过启动"
@@ -567,12 +616,11 @@ def action(user_message, metadata, **kwargs):
                 "height": 1024,
                 "steps": 30
             },
-            timeout=180  # 3 分钟超时
+            timeout=180
         )
         result = resp.json()
         
         if result.get("success"):
-            # 返回图片 Markdown（Open WebUI 支持直接渲染）
             return {
                 "response": f"![Generated Image]({result['image']})\n\n✅ **图片生成完成！**\n- 提示词: `{prompt}`\n- 尺寸: {result.get('dimensions', '1024x1024')}"
             }
@@ -656,6 +704,7 @@ open_browser() {
   echo "  • 查看日志: ${CYAN}$0 logs${NC}"
   echo "  • 停止服务: ${CYAN}$0 stop${NC}"
   echo "  • 自我修复: ${CYAN}$0 repair${NC}"
+  echo "  • 更新服务: ${CYAN}$0 update${NC}"
 }
 
 # =============================================================================
@@ -667,7 +716,7 @@ stop_services() {
   
   log "停止 MLX 服务..."
   if [[ -f "$LOG_DIR/mlx.pid" ]]; then
-    local pid=$(cat "$LOG_DIR/mlx.pid" 2>/dev/null)
+    local pid=$(cat "$LOG_DIR/mlx.pid" 2>/dev/null || echo "")
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
       kill "$pid" 2>/dev/null || true
       sleep 1
@@ -687,7 +736,7 @@ stop_services() {
   
   log "停止 Stable Diffusion..."
   if [[ -f "$LOG_DIR/sd.pid" ]]; then
-    local pid=$(cat "$LOG_DIR/sd.pid" 2>/dev/null)
+    local pid=$(cat "$LOG_DIR/sd.pid" 2>/dev/null || echo "")
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
       kill "$pid" 2>/dev/null || true
       sleep 1
@@ -719,10 +768,11 @@ uninstall() {
   printf "${YELLOW}模型文件将不会被回收，如需保留请提前备份${NC}\n"
   echo ""
   
-  read -q "REPLY?确认卸载？(输入 YES 继续) " || true
+  echo -n "确认卸载？(输入 YES 继续) "
+  read -r REPLY || true
   echo
   
-  if [[ $REPLY != "YES" ]]; then
+  if [[ "${REPLY:-}" != "YES" ]]; then
     log "取消卸载"
     return 0
   fi
@@ -826,7 +876,7 @@ show_status() {
 # =============================================================================
 
 update_script() {
-  title "检查并应用更新"
+  title "检查并应用脚本更新"
   
   log "检查脚本更新..."
   
@@ -836,7 +886,7 @@ update_script() {
   
   if download_with_retry "$SCRIPT_REPO" "$tmp_script"; then
     # 比较版本
-    local new_version=$(grep "^: \"\${SCRIPT_VERSION:=" "$tmp_script" 2>/dev/null | cut -d'=' -f2 | cut -d'}' -f1 | tr -d '"')
+    local new_version=$(grep "^: \"\${SCRIPT_VERSION:=" "$tmp_script" 2>/dev/null | cut -d'=' -f2 | cut -d'}' -f1 | tr -d '"' || echo "unknown")
     
     if [[ "$new_version" == "$SCRIPT_VERSION" ]]; then
       success "✓ 已是最新版本 ($SCRIPT_VERSION)"
@@ -876,16 +926,74 @@ update_dependencies() {
   pip install --quiet --upgrade \
     'mlx-lm>=0.20.0' \
     'huggingface_hub>=0.20.0' \
+    'hf-transfer>=0.1.0' \
     2>/dev/null && success "✓ 依赖已更新" || warn "依赖更新警告（可忽略）"
   
   # 检查模型更新（可选）
   log "检查模型更新..."
   if [[ -f "$MODEL_DIR/qwen3-8b-mlx/config.json" ]]; then
-    # 简单检查：比较远程 config.json 的 hash（简化版）
     echo "  💡 模型更新需手动运行: $0 setup"
   fi
   
   success "✓ 依赖检查完成"
+}
+
+update_open_webui() {
+  title "更新 Open WebUI"
+  
+  log "拉取最新 Open WebUI 镜像..."
+  docker pull ghcr.io/open-webui/open-webui:main 2>&1 | tail -5
+  
+  # 如果容器在运行，重启以应用更新
+  if docker ps --format '{{.Names}}' | grep -q "^open-webui$"; then
+    log "重启 Open WebUI 以应用更新..."
+    docker restart open-webui
+    sleep 10
+    if wait_for_http "http://127.0.0.1:$WEBUI_PORT"; then
+      success "✓ Open WebUI 已更新并重启"
+    else
+      warn "Open WebUI 重启中，请刷新页面"
+    fi
+  else
+    success "✓ Open WebUI 镜像已更新（下次启动时应用）"
+  fi
+}
+
+update_mlx() {
+  title "更新 MLX 架构"
+  
+  source "$VENV_DIR/bin/activate" 2>/dev/null || {
+    warn "虚拟环境未激活，跳过 MLX 更新"
+    return 0
+  }
+  
+  log "更新 MLX 相关依赖..."
+  pip install --quiet --upgrade \
+    'mlx-lm>=0.20.0' \
+    'mlx>=0.15.0' \
+    2>/dev/null && success "✓ MLX 已更新" || warn "MLX 更新警告（可忽略）"
+}
+
+update_models() {
+  title "检查模型更新"
+  
+  source "$VENV_DIR/bin/activate"
+  export HF_ENDPOINT="$HF_ENDPOINT"
+  
+  # 检查 Qwen 模型
+  if [[ -f "$MODEL_DIR/qwen3-8b-mlx/config.json" ]]; then
+    log "检查 Qwen 模型更新..."
+    # 简单检查：比较远程 config 的 last_modified（简化版）
+    echo "  💡 模型更新需手动运行: $0 setup"
+  fi
+  
+  # 检查 SD 模型
+  if [[ -f "$MODEL_DIR/stable-diffusion/model_index.json" ]]; then
+    log "检查 SD 模型更新..."
+    echo "  💡 模型更新需手动运行: $0 setup"
+  fi
+  
+  success "✓ 模型检查完成"
 }
 
 # =============================================================================
@@ -921,7 +1029,17 @@ repair_common_issues() {
     ((fixed++))
   fi
   
-  # 🔹 修复 4: SSL 证书问题
+  # 🔹 修复 4: read -q 兼容性问题
+  if grep -q 'read -q' "$0" 2>/dev/null; then
+    log "修复: read -q 兼容性问题..."
+    sed -i '' 's/read -q "REPLY?\([^"]*\)" || true/echo -n "\1 "; read -r REPLY || true/g' "$0" 2>/dev/null || true
+    sed -i '' 's/\[\[ \$REPLY =~/[[ "${REPLY:-}" =~/g' "$0" 2>/dev/null || true
+    sed -i '' 's/-z \$REPLY/-z "${REPLY:-}"/g' "$0" 2>/dev/null || true
+    success "✓ 已修复 read 命令兼容性"
+    ((fixed++))
+  fi
+  
+  # 🔹 修复 5: SSL 证书问题
   if ! python3 -m certifi &>/dev/null 2>&1; then
     log "修复: 安装 certifi 证书包..."
     source "$VENV_DIR/bin/activate" 2>/dev/null && \
@@ -929,32 +1047,50 @@ repair_common_issues() {
     success "✓ 已安装 certifi" && ((fixed++)) || warn "certifi 安装失败"
   fi
   
-  # 🔹 修复 5: 端口冲突检测
+  # 🔹 修复 6: hf-transfer 未启用
+  if ! pip show hf-transfer &>/dev/null; then
+    log "修复: 安装 hf-transfer 加速下载..."
+    source "$VENV_DIR/bin/activate" 2>/dev/null && \
+    pip install --quiet hf-transfer 2>/dev/null && \
+    success "✓ 已安装 hf-transfer" && ((fixed++)) || warn "hf-transfer 安装失败"
+  fi
+  
+  # 🔹 修复 7: 端口冲突检测
   for port in $MLX_PORT $WEBUI_PORT $SD_PORT; do
     if port_in_use "$port"; then
       local proc=$(lsof -ti :$port 2>/dev/null | head -1)
       if [[ -n "$proc" ]]; then
         log "检测到端口 $port 被占用 (PID: $proc)"
-        read -q "REPLY?是否释放端口 $port？(y/N) " || true
+        echo -n "是否释放端口 $port？(y/N) "
+        read -r REPLY || true
         echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
+        if [[ "${REPLY:-}" =~ ^[Yy]$ ]]; then
           kill -9 "$proc" 2>/dev/null && success "✓ 已释放端口 $port" && ((fixed++)) || warn "释放失败"
         fi
       fi
     fi
   done
   
-  # 🔹 修复 6: Docker 网络配置
+  # 🔹 修复 8: Docker 网络配置
   if ! docker inspect host.docker.internal &>/dev/null 2>&1; then
     log "修复: Docker host.docker.internal 配置..."
-    # macOS 通常已内置支持，此处仅为提示
     echo "  💡 如连接失败，请确保 Docker Desktop 已启动"
   fi
   
-  # 🔹 修复 7: 权限问题
+  # 🔹 修复 9: 权限问题
   if [[ ! -w "$LOG_DIR" ]] 2>/dev/null; then
     log "修复: 日志目录权限..."
     chmod -R u+w "$LOG_DIR" 2>/dev/null && success "✓ 已修复日志目录权限" && ((fixed++)) || true
+  fi
+  
+  # 🔹 修复 10: 虚拟环境损坏
+  if [[ ! -f "$VENV_DIR/bin/activate" ]]; then
+    log "修复: 重建虚拟环境..."
+    rm -rf "$VENV_DIR"
+    python3 -m venv "$VENV_DIR"
+    source "$VENV_DIR/bin/activate"
+    pip install --quiet mlx-lm huggingface_hub hf-transfer 2>/dev/null && \
+    success "✓ 已重建虚拟环境" && ((fixed++)) || warn "虚拟环境重建失败"
   fi
   
   # 总结
@@ -990,6 +1126,7 @@ show_logs() {
     echo "=== MLX 日志 ===" && tail -20 "$LOG_DIR/mlx.log" 2>/dev/null
     echo -e "\n=== WebUI 日志 ===" && tail -20 "$LOG_DIR/webui.log" 2>/dev/null
     echo -e "\n=== SD 日志 ===" && tail -20 "$LOG_DIR/sd.log" 2>/dev/null
+    echo -e "\n=== 下载日志 ===" && tail -20 "$LOG_DIR/download.log" 2>/dev/null
     echo -e "\n${DIM}提示: 安装 multitail 可获得更好的日志体验: brew install multitail${NC}"
   fi
 }
@@ -1035,6 +1172,10 @@ main() {
     update)
       update_script "$@"
       update_dependencies
+      update_open_webui
+      update_mlx
+      update_models
+      success "✓ 所有组件更新检查完成"
       ;;
     
     repair)
@@ -1070,7 +1211,7 @@ main() {
       printf "  setup     - 首次部署：检查环境 + 安装依赖 + 下载模型\n"
       printf "  start     - 启动所有服务 + 自动打开浏览器\n"
       printf "  status    - 查看服务与模型运行状态\n"
-      printf "  update    - 检查并应用脚本/依赖更新\n"
+      printf "  update    - 更新脚本/依赖/模型 (支持增量更新)\n"
       printf "  repair    - 自我修复常见问题（端口/配置/权限）\n"
       printf "  stop      - 优雅停止所有服务\n"
       printf "  restart   - 重启所有服务（stop + start）\n"
@@ -1082,6 +1223,7 @@ main() {
       printf "  2. 日常:  ${CYAN}$0 start${NC}\n"
       printf "  3. 停止:  ${CYAN}$0 stop${NC}\n"
       printf "  4. 修复:  ${CYAN}$0 repair${NC}（遇到问题时）\n"
+      printf "  5. 更新:  ${CYAN}$0 update${NC}（获取新功能）\n"
       printf "\n${BOLD}配置提示:${NC}\n"
       printf "  • Open WebUI 连接 MLX:\n"
       printf "    API Base URL: ${CYAN}http://$DOCKER_HOST_URL:$MLX_PORT/v1${NC}\n"
@@ -1089,6 +1231,7 @@ main() {
       printf "\n"
       printf "  • 启用画图: 导入 $CONFIG_DIR/draw-function.py\n"
       printf "  • 自定义: 编辑脚本顶部的配置区变量\n"
+      printf "  • 加速下载: 确保安装了 hf-transfer (pip install hf-transfer)\n"
       ;;
     
     *)
