@@ -149,31 +149,130 @@ AI Studio 采用**渐进式披露**设计。以下是按使用场景分类的详
 
 ```text
 ai-studio/
-├── ai-studio.sh              # 主入口脚本 (CLI 路由与调度)
-├── README.md                 # 项目说明文档 (本文件)
-├── LICENSE                   # GNU GPL v3 许可证文件
-├── lib/                      # 核心功能库
-│   ├── common.sh             # 通用工具 (日志、颜色、辅助函数)
-│   ├── config.sh             # 全局配置管理
-│   ├── env-check.sh          # 系统环境检测逻辑
-│   ├── env-install.sh        # 系统环境安装逻辑
-│   ├── browser.sh            # 浏览器自动唤起控制
-│   ├── process.sh            # 后台进程与 PID 管理
-│   ├── diagnose.sh           # 通用诊断函数
-│   └── ui.sh                 # 终端 UI 渲染 (进度条、表格)
-├── components/               # 组件目录
-│   ├── registry.sh           # 组件注册表
-│   ├── open-webui/           # Open WebUI 脚本集 (8个标准脚本)
-│   ├── sillytavern/          # SillyTavern 脚本集
-│   ├── continue-dev/         # Continue.dev 脚本集
-│   ├── fazm/                 # Fazm 脚本集
-│   ├── browser-use/          # Browser Use 脚本集
-│   ├── mlx/                  # MLX 脚本集
-│   ├── comfyui/              # ComfyUI 脚本集
-│   ├── mlx-video/            # MLX-Video 脚本集
-│   └── qwen3/                # QWen3 脚本集
-├── config/                   # 运行时生成的全局配置文件
-└── logs/                     # 运行日志和诊断报告存放目录
+├── ai-studio.sh                  # 主入口脚本（调度器）
+├── LICENSE                       # 协议
+├── README.md                     # 使用文档
+├── README_en.md                  # 英文使用文档
+├── README_zh.md                  # 中文使用文档
+│
+├── lib/                          # 核心共享库
+│   ├── common.sh                 # 通用工具（颜色、日志、权限检查）
+│   ├── config.sh                 # 配置管理（读写配置）
+│   ├── env-check.sh              # 环境检测（系统、硬件、软件）
+│   ├── env-install.sh            # 环境安装（自动安装缺失依赖）
+│   ├── browser.sh                # 浏览器自动打开
+│   ├── process.sh                # 进程管理（PID、端口、信号）
+│   ├── diagnose.sh               # 诊断引擎（简单/深入）
+│   └── ui.sh                     # 渐进式披露 UI 层
+│
+├── env/                          # 环境安装脚本
+│   ├── check-system.sh           # 系统级检测（macOS版本、芯片、内存、磁盘）
+│   ├── install-homebrew.sh       # Homebrew 安装
+│   ├── install-python.sh         # Python 3.11+ 安装
+│   ├── install-node.sh           # Node.js 18+ 安装
+│   ├── install-ollama.sh         # Ollama 安装
+│   ├── install-git-lfs.sh        # Git LFS 安装
+│   └── install-xcode-cli.sh      # Xcode CLI Tools 安装
+│
+├── components/                   # 组件目录
+│   ├── registry.sh               # 组件注册表（元数据、依赖关系）
+│   │
+│   ├── open-webui/               # Open WebUI
+│   │   ├── metadata.sh           # 组件元数据
+│   │   ├── install.sh            # 首次部署
+│   │   ├── start.sh              # 启动服务
+│   │   ├── stop.sh               # 停止服务
+│   │   ├── status.sh             # 查看状态
+│   │   ├── update.sh             # 更新
+│   │   ├── diagnose.sh           # 自我诊断
+│   │   └── uninstall.sh          # 卸载
+│   │
+│   ├── sillytavern/              # SillyTavern
+│   │   ├── metadata.sh           # 组件元数据
+│   │   ├── install.sh            # 首次部署
+│   │   ├── start.sh              # 启动服务
+│   │   ├── stop.sh               # 停止服务
+│   │   ├── status.sh             # 查看状态
+│   │   ├── update.sh             # 更新
+│   │   ├── diagnose.sh           # 自我诊断
+│   │   └── uninstall.sh          # 卸载
+│   │
+│   ├── continue-dev/             # Continue.dev
+│   │   ├── metadata.sh           # 组件元数据
+│   │   ├── install.sh            # 首次部署
+│   │   ├── start.sh              # 启动服务
+│   │   ├── stop.sh               # 停止服务
+│   │   ├── status.sh             # 查看状态
+│   │   ├── update.sh             # 更新
+│   │   ├── diagnose.sh           # 自我诊断
+│   │   └── uninstall.sh          # 卸载
+│   │
+│   ├── fazm/                     # Fazm
+│   │   ├── metadata.sh           # 组件元数据
+│   │   ├── install.sh            # 首次部署
+│   │   ├── start.sh              # 启动服务
+│   │   ├── stop.sh               # 停止服务
+│   │   ├── status.sh             # 查看状态
+│   │   ├── update.sh             # 更新
+│   │   ├── diagnose.sh           # 自我诊断
+│   │   └── uninstall.sh          # 卸载
+│   │
+│   ├── browser-use/              # Browser Use
+│   │   ├── metadata.sh           # 组件元数据
+│   │   ├── install.sh            # 首次部署
+│   │   ├── start.sh              # 启动服务
+│   │   ├── stop.sh               # 停止服务
+│   │   ├── status.sh             # 查看状态
+│   │   ├── update.sh             # 更新
+│   │   ├── diagnose.sh           # 自我诊断
+│   │   └── uninstall.sh          # 卸载
+│   │
+│   ├── mlx/                      # MLX
+│   │   ├── metadata.sh           # 组件元数据
+│   │   ├── install.sh            # 首次部署
+│   │   ├── start.sh              # 启动服务
+│   │   ├── stop.sh               # 停止服务
+│   │   ├── status.sh             # 查看状态
+│   │   ├── update.sh             # 更新
+│   │   ├── diagnose.sh           # 自我诊断
+│   │   └── uninstall.sh          # 卸载
+│   │
+│   ├── comfyui/                  # ComfyUI (SDXL/FLUX)
+│   │   ├── metadata.sh           # 组件元数据
+│   │   ├── install.sh            # 首次部署
+│   │   ├── start.sh              # 启动服务
+│   │   ├── stop.sh               # 停止服务
+│   │   ├── status.sh             # 查看状态
+│   │   ├── update.sh             # 更新
+│   │   ├── diagnose.sh           # 自我诊断
+│   │   └── uninstall.sh          # 卸载
+│   │
+│   ├── mlx-video/                # MLX-Video
+│   │   ├── metadata.sh           # 组件元数据
+│   │   ├── install.sh            # 首次部署
+│   │   ├── start.sh              # 启动服务
+│   │   ├── stop.sh               # 停止服务
+│   │   ├── status.sh             # 查看状态
+│   │   ├── update.sh             # 更新
+│   │   ├── diagnose.sh           # 自我诊断
+│   │   └── uninstall.sh          # 卸载
+│   │
+│   └── qwen3/                    # QWen3 Uncensored
+│   │   ├── metadata.sh           # 组件元数据
+│   │   ├── install.sh            # 首次部署
+│   │   ├── start.sh              # 启动服务
+│   │   ├── stop.sh               # 停止服务
+│   │   ├── status.sh             # 查看状态
+│   │   ├── update.sh             # 更新
+│   │   ├── diagnose.sh           # 自我诊断
+│   └── └── uninstall.sh          # 卸载
+│
+├── config/
+│   ├── ai-studio.conf            # 主配置文件
+│   └── ports.conf                # 端口分配表
+│
+└── logs/                         # 日志目录
+    └── .gitkeep
 ```
 
 ---
