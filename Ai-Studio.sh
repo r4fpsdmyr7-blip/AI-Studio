@@ -1,224 +1,162 @@
 #!/bin/zsh
 # =============================================================================
-# 🚀 Local AI Starter: Open WebUI + MLX + Qwen3 (macOS Apple Silicon)
+# 🍎 macOS Local AI 一键部署脚本
+# 功能: 检查环境 → 安装 MLX → 下载 Qwen3 → 启动 Open WebUI
 # 用法: 
-#   ./start-local-ai.sh start     # 启动所有服务
-#   ./start-local-ai.sh stop      # 停止所有服务
-#   ./start-local-ai.sh status    # 查看服务状态
-#   ./start-local-ai.sh logs      # 查看实时日志
-#   ./start-local-ai.sh restart   # 重启服务
+#   ./local-ai-setup.sh setup     # 首次安装环境与模型
+#   ./local-ai-setup.sh start     # 启动所有服务
+#   ./local-ai-setup.sh stop      # 停止所有服务
+#   ./local-ai-setup.sh status    # 查看运行状态
+#   ./local-ai-setup.sh logs      # 查看实时日志
+#   ./local-ai-setup.sh clean     # 清理缓存/日志/容器
 # =============================================================================
 
-# 📁 配置区域（请根据实际情况修改）
-PROJECT_DIR="$HOME/local-ai"                    # 项目根目录
-MODEL_DIR="$PROJECT_DIR/qwen3-8b-mlx"          # MLX 模型路径
-VENV_DIR="$PROJECT_DIR/mlx-env"                # Python 虚拟环境
-LOG_DIR="$PROJECT_DIR/logs"                    # 日志目录
-MLX_PORT=8000                                   # MLX API 端口
-WEBUI_PORT=3000                                 # Open WebUI 端口
-MLX_LOG="$LOG_DIR/mlx.log"                      # MLX 日志文件
-WEBUI_LOG="$LOG_DIR/webui.log"                  # Open WebUI 日志文件
+set -e  # 遇错即停
 
-# 🎨 颜色输出
+# 📁 全局配置（可按需修改）
+PROJECT_DIR="$HOME/local-ai"
+MODEL_DIR="$PROJECT_DIR/models/qwen3-8b-mlx"
+VENV_DIR="$PROJECT_DIR/mlx-env"
+LOG_DIR="$PROJECT_DIR/logs"
+MLX_PORT=8000
+WEBUI_PORT=3000
+MODEL_REPO="mlx-community/Qwen3-8B-4bit"
+HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
+
+# 🎨 终端样式
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
-
-# =============================================================================
-# 🔧 工具函数
-# =============================================================================
-
-log() { echo -e "${BLUE}[INFO]${NC} $(date '+%H:%M:%S') $1"; }
+log()     { echo -e "${BLUE}[INFO]${NC} $(date '+%H:%M:%S') $1"; }
 success() { echo -e "${GREEN}[✓]${NC} $(date '+%H:%M:%S') $1"; }
-warn() { echo -e "${YELLOW}[⚠]${NC} $(date '+%H:%M:%S') $1"; }
-error() { echo -e "${RED}[✗]${NC} $(date '+%H:%M:%S') $1" >&2; }
+warn()    { echo -e "${YELLOW}[⚠]${NC} $(date '+%H:%M:%S') $1"; }
+error()   { echo -e "${RED}[✗]${NC} $(date '+%H:%M:%S') $1"; }
 
-check_cmd() { command -v "$1" >/dev/null 2>&1 || { error "$1 未安装"; exit 1; } }
+# =============================================================================
+# 🔧 核心函数
+# =============================================================================
 
-check_port() { lsof -ti :"$1" 2>/dev/null; }
-
-wait_for_port() {
-  local port=$1 timeout=${2:-30} elapsed=0
-  while ! check_port "$port" >/dev/null 2>&1; do
-    [[ $elapsed -ge $timeout ]] && return 1
-    sleep 1; ((elapsed++))
-  done
-  return 0
+check_arch() {
+  [[ "$(uname -m)" == "arm64" ]] || { error "MLX 仅支持 Apple Silicon (M1/M2/M3/M4)"; exit 1; }
 }
 
-# =============================================================================
-# 🚀 核心功能
-# =============================================================================
+check_docker() {
+  command -v docker >/dev/null || { error "Docker 未安装。请先安装 Docker Desktop: https://docker.com/products/docker-desktop"; exit 1; }
+  docker info >/dev/null 2>&1 || { error "Docker 未运行。请启动 Docker Desktop"; exit 1; }
+}
+
+setup_env() {
+  log "📦 创建项目目录..."
+  mkdir -p "$MODEL_DIR" "$LOG_DIR"
+
+  if [[ ! -d "$VENV_DIR" ]]; then
+    log "🐍 创建 Python 虚拟环境..."
+    python3 -m venv "$VENV_DIR"
+  fi
+
+  source "$VENV_DIR/bin/activate"
+  
+  log "🔧 修复 SSL 证书 & 安装依赖..."
+  export SSL_CERT_FILE=$(python3 -m certifi)
+  export REQUESTS_CA_BUNDLE=$(python3 -m certifi)
+  export HF_ENDPOINT="$HF_ENDPOINT"
+
+  pip install --quiet --upgrade pip setuptools
+  pip install --quiet mlx-lm huggingface_hub accelerate certifi
+  
+  success "Python 环境就绪"
+}
+
+download_model() {
+  if [[ -f "$MODEL_DIR/config.json" ]]; then
+    success "模型已存在: $MODEL_DIR"
+    return 0
+  fi
+
+  log "📥 下载 Qwen3 MLX 模型 (约 4.6GB，请耐心等待)..."
+  source "$VENV_DIR/bin/activate"
+  export HF_ENDPOINT="$HF_ENDPOINT"
+  
+  hf download "$MODEL_REPO" --local-dir "$MODEL_DIR" || {
+    error "下载失败。请检查网络或手动设置 HF_ENDPOINT"
+    exit 1
+  }
+  success "模型下载完成"
+}
 
 start_mlx() {
-  log "启动 MLX + Qwen3 服务 (端口 $MLX_PORT)..."
+  log "⚡ 启动 MLX 推理服务 (端口 $MLX_PORT)..."
   
-  # 检查模型文件
-  [[ ! -f "$MODEL_DIR/config.json" ]] && { error "模型文件缺失: $MODEL_DIR/config.json"; return 1; }
-  
-  # 激活虚拟环境
-  source "$VENV_DIR/bin/activate" 2>/dev/null || { error "虚拟环境激活失败"; return 1; }
-  
-  # 创建日志目录
-  mkdir -p "$LOG_DIR"
-  
-  # 后台启动 MLX 服务
+  # 清理残留进程
+  if lsof -ti :$MLX_PORT >/dev/null 2>&1; then
+    lsof -ti :$MLX_PORT | xargs kill -9 2>/dev/null
+    sleep 1
+  fi
+
+  source "$VENV_DIR/bin/activate"
   nohup mlx_lm.server \
     --model "$MODEL_DIR" \
     --host 127.0.0.1 \
-    --port "$MLX_PORT" \
+    --port $MLX_PORT \
     --max-tokens 4096 \
-    > "$MLX_LOG" 2>&1 &
+    > "$LOG_DIR/mlx.log" 2>&1 &
   
-  local pid=$!
-  echo $pid > "$LOG_DIR/mlx.pid"
-  
-  # 等待服务就绪
-  if wait_for_port "$MLX_PORT" 60; then
-    success "MLX 服务已启动 (PID: $pid)"
-    # 验证 API
-    if curl -s --max-time 5 "http://127.0.0.1:$MLX_PORT/v1/models" | grep -q "model"; then
-      success "API 验证通过"
-      return 0
-    fi
+  echo $! > "$LOG_DIR/mlx.pid"
+  log "等待模型加载 (首次约 30~60 秒)..."
+  sleep 15
+
+  if curl -s --max-time 5 "http://127.0.0.1:$MLX_PORT/v1/models" | grep -q "model"; then
+    success "MLX 服务已就绪"
+  else
+    warn "模型仍在后台加载，可执行: tail -f $LOG_DIR/mlx.log 查看进度"
   fi
-  warn "MLX 服务启动中，请查看日志: $MLX_LOG"
-  return 0
 }
 
 start_webui() {
-  log "启动 Open WebUI (端口 $WEBUI_PORT)..."
+  log "🌐 启动 Open WebUI (端口 $WEBUI_PORT)..."
   
-  # 检查 Docker
-  check_cmd docker || return 1
-  docker info >/dev/null 2>&1 || { error "Docker 未运行"; return 1; }
-  
-  # 检查容器是否已在运行
   if docker ps --format '{{.Names}}' | grep -q "^open-webui$"; then
     success "Open WebUI 已在运行"
     return 0
   fi
-  
-  # 启动容器
+
   docker run -d \
     --name open-webui \
     --restart always \
-    -p "$WEBUI_PORT":8080 \
+    -p $WEBUI_PORT:8080 \
     -v open-webui:/app/backend/data \
-    -e OLLAMA_BASE_URL="" \
+    -e OPENAI_API_BASE_URL="" \
     ghcr.io/open-webui/open-webui:main \
-    > "$WEBUI_LOG" 2>&1
+    > "$LOG_DIR/webui.log" 2>&1
   
-  # 等待容器就绪
-  if wait_for_port "$WEBUI_PORT" 30; then
-    success "Open WebUI 已启动 (http://localhost:$WEBUI_PORT)"
-    return 0
-  fi
-  warn "Open WebUI 启动中，请查看日志: $WEBUI_LOG"
-  return 0
-}
-
-start_all() {
-  log "🚀 启动 Local AI 环境..."
-  
-  # 创建项目目录
-  mkdir -p "$PROJECT_DIR" "$LOG_DIR"
-  
-  # 启动 MLX 服务
-  start_mlx || { error "MLX 启动失败"; return 1; }
-  
-  # 等待 MLX 完全就绪（模型加载需要时间）
-  log "等待模型加载 (最多 90 秒)..."
-  sleep 10  # 给模型加载预留时间
-  
-  # 启动 Open WebUI
-  start_webui || { error "Open WebUI 启动失败"; return 1; }
-  
-  # 自动打开浏览器
-  if command -v open >/dev/null 2>&1; then
-    log "🌐 正在打开 Open WebUI..."
-    open "http://localhost:$WEBUI_PORT"
-  fi
-  
-  success "✨ 所有服务启动完成！"
-  echo -e "\n${GREEN}📋 使用指南:${NC}"
-  echo "  • Open WebUI: http://localhost:$WEBUI_PORT"
-  echo "  • MLX API:    http://127.0.0.1:$MLX_PORT/v1"
-  echo "  • 模型名称:   $(curl -s "http://127.0.0.1:$MLX_PORT/v1/models" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data'][0]['id'] if d.get('data') else '未知')" 2>/dev/null || echo "请查看 /v1/models")"
-  echo "  • 停止服务:   ./start-local-ai.sh stop"
-  echo "  • 查看日志:   ./start-local-ai.sh logs"
-}
-
-stop_mlx() {
-  log "停止 MLX 服务..."
-  if [[ -f "$LOG_DIR/mlx.pid" ]]; then
-    local pid=$(cat "$LOG_DIR/mlx.pid")
-    if ps -p "$pid" >/dev/null 2>&1; then
-      kill "$pid" 2>/dev/null
-      sleep 2
-      kill -9 "$pid" 2>/dev/null
-      success "MLX 服务已停止 (PID: $pid)"
-    fi
-    rm -f "$LOG_DIR/mlx.pid"
-  fi
-  # 备用：通过端口查找进程
-  local port_pid=$(check_port "$MLX_PORT")
-  if [[ -n "$port_pid" ]]; then
-    kill -9 "$port_pid" 2>/dev/null
-    success "MLX 服务已强制停止 (端口 $MLX_PORT)"
-  fi
-}
-
-stop_webui() {
-  log "停止 Open WebUI..."
-  if docker ps --format '{{.Names}}' | grep -q "^open-webui$"; then
-    docker stop open-webui >/dev/null 2>&1
-    docker rm open-webui >/dev/null 2>&1
-    success "Open WebUI 容器已停止"
-  fi
+  success "Open WebUI 容器已启动"
 }
 
 stop_all() {
   log "🛑 停止所有服务..."
-  stop_mlx
-  stop_webui
-  success "所有服务已停止"
+  if [[ -f "$LOG_DIR/mlx.pid" ]]; then
+    kill $(cat "$LOG_DIR/mlx.pid") 2>/dev/null
+    rm -f "$LOG_DIR/mlx.pid"
+  fi
+  lsof -ti :$MLX_PORT | xargs kill -9 2>/dev/null
+  docker stop open-webui 2>/dev/null || true
+  docker rm open-webui 2>/dev/null || true
+  success "服务已停止"
 }
 
 show_status() {
-  echo -e "\n${BLUE}📊 服务状态:${NC}"
+  echo -e "\n${BLUE}📊 本地 AI 环境状态:${NC}"
+  echo -n "  🐍 MLX ($MLX_PORT): "
+  lsof -ti :$MLX_PORT >/dev/null 2>&1 && echo -e "${GREEN}● 运行中${NC}" || echo -e "${RED}○ 未运行${NC}"
   
-  # MLX 状态
-  echo -n "  MLX ($MLX_PORT): "
-  if check_port "$MLX_PORT" >/dev/null 2>&1; then
-    echo -e "${GREEN}● 运行中${NC}"
-    curl -s "http://127.0.0.1:$MLX_PORT/v1/models" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print('    模型:', d['data'][0]['id'] if d.get('data') else '未知')" 2>/dev/null
-  else
-    echo -e "${RED}○ 未运行${NC}"
-  fi
+  echo -n "  🌐 Open WebUI ($WEBUI_PORT): "
+  docker ps --format '{{.Names}}' | grep -q open-webui && echo -e "${GREEN}● 运行中${NC}" || echo -e "${RED}○ 未运行${NC}"
   
-  # Open WebUI 状态
-  echo -n "  Open WebUI ($WEBUI_PORT): "
-  if docker ps --format '{{.Names}}' | grep -q "^open-webui$"; then
-    echo -e "${GREEN}● 运行中${NC} (http://localhost:$WEBUI_PORT)"
-  else
-    echo -e "${RED}○ 未运行${NC}"
-  fi
-  
-  # 磁盘使用
-  if [[ -d "$MODEL_DIR" ]]; then
-    local size=$(du -sh "$MODEL_DIR" 2>/dev/null | cut -f1)
-    echo "  模型大小: $size"
-  fi
+  echo -n "  📦 模型路径: $MODEL_DIR "
+  [[ -f "$MODEL_DIR/config.json" ]] && echo -e "${GREEN}(完整)${NC}" || echo -e "${RED}(缺失，请运行 setup)${NC}"
 }
 
 show_logs() {
-  echo -e "${BLUE}📋 实时日志 (Ctrl+C 退出)${NC}\n"
-  
-  # 同时跟踪两个日志文件
-  if [[ -f "$MLX_LOG" ]] || [[ -f "$WEBUI_LOG" ]]; then
-    tail -f "$MLX_LOG" "$WEBUI_LOG" 2>/dev/null
-  else
-    warn "日志文件不存在，请先启动服务"
-  fi
+  echo -e "${BLUE}📋 实时日志 (Ctrl+C 退出)${NC}"
+  [[ -d "$LOG_DIR" ]] && tail -f "$LOG_DIR"/*.log 2>/dev/null || warn "日志目录为空"
 }
 
 # =============================================================================
@@ -226,23 +164,48 @@ show_logs() {
 # =============================================================================
 
 main() {
-  case "${1:-start}" in
-    start)   start_all ;;
-    stop)    stop_all ;;
-    restart) stop_all; sleep 2; start_all ;;
-    status)  show_status ;;
-    logs)    show_logs ;;
-    help|--help|-h)
-      echo "用法: $0 {start|stop|restart|status|logs}"
-      echo "  start   - 启动所有服务"
-      echo "  stop    - 停止所有服务"
-      echo "  restart - 重启所有服务"
-      echo "  status  - 查看服务状态"
-      echo "  logs    - 查看实时日志"
+  case "${1:-help}" in
+    setup)
+      check_arch
+      setup_env
+      download_model
+      success "✅ 环境部署完成！请执行: $0 start"
       ;;
-    *) error "未知命令: $1"; echo "使用 '$0 help' 查看帮助"; exit 1 ;;
+    start)
+      check_docker
+      [[ ! -d "$VENV_DIR" ]] && { error "请先执行: $0 setup"; exit 1; }
+      start_mlx
+      start_webui
+      echo -e "\n${GREEN}🎉 所有服务已启动！${NC}"
+      echo "  🌐 浏览器访问: http://localhost:$WEBUI_PORT"
+      echo "  🔗 Open WebUI 连接配置:"
+      echo "     • API Base URL: http://host.docker.internal:$MLX_PORT/v1"
+      echo "     • API Key: mlx-local (任意值)"
+      echo "     • Model IDs: [留空自动识别]"
+      ;;
+    stop)   stop_all ;;
+    restart) stop_all; sleep 2; $0 start ;;
+    status) show_status ;;
+    logs)   show_logs ;;
+    clean)
+      log "🧹 清理运行数据 (保留模型)..."
+      stop_all
+      rm -rf "$LOG_DIR"
+      docker volume prune -f 2>/dev/null || true
+      success "清理完成"
+      ;;
+    help|--help|-h)
+      echo -e "${BLUE}用法:${NC} $0 {setup|start|stop|restart|status|logs|clean}"
+      echo "  setup   - 初始化环境 & 下载模型 (首次必跑)"
+      echo "  start   - 启动 MLX + Open WebUI"
+      echo "  stop    - 停止所有服务"
+      echo "  restart - 重启服务"
+      echo "  status  - 查看运行状态"
+      echo "  logs    - 查看实时日志"
+      echo "  clean   - 清理日志与 Docker 缓存"
+      ;;
+    *) error "未知命令: $1"; $0 help; exit 1 ;;
   esac
 }
 
-# 执行主函数
 main "$@"
