@@ -4,7 +4,7 @@
 # =============================================================================
 # 功能：管理 Open WebUI, SillyTavern, Continue.dev, FaaS, Browser Use,
 #       MLX, ComfyUI (SDXL/FLUX), MLX-Video 的部署、更新、诊断与卸载
-# 版本：1.5.0 (Ultimate Fix: HTTP/2 CANCEL, Auth Hang, PyPI Mirror, Full Menu)
+# 版本：1.6.0 (Restored: Auto-open browser & wait_for_service logic)
 # =============================================================================
 set -uo pipefail
 
@@ -20,7 +20,7 @@ if [[ ${BASH_VERSINFO[0]:-0} -lt 4 ]]; then
     exit 1
 fi
 
-readonly SCRIPT_VERSION="1.5.0"
+readonly SCRIPT_VERSION="1.6.0"
 readonly INSTALL_DIR="${HOME}/ai-studio"
 readonly LOG_DIR="${INSTALL_DIR}/logs"
 readonly BACKUP_DIR="${INSTALL_DIR}/backups"
@@ -45,7 +45,6 @@ declare -A COMPONENTS=(
     [browser-use]="Browser Use|https://github.com/browser-use/browser-use.git|8082|http://localhost:8082"
     [mlx]="MLX|https://github.com/ml-explore/mlx.git|N/A|local"
     [comfyui]="ComfyUI|https://github.com/comfyanonymous/ComfyUI.git|8188|http://localhost:8188"
-    # 🌟 核心修复 4：修正为真实存在的公开仓库
     [mlx-video]="MLX-Video|https://github.com/Blaizzy/mlx-video.git|N/A|local"
 )
 
@@ -71,7 +70,6 @@ check_dependencies() {
             missing+=("$dep")
         fi
     done
-    # macOS 编译工具检查 (防止 pip 编译 C 扩展时卡死)
     if [[ "$OSTYPE" == "darwin"* ]]; then
         if ! xcode-select -p &>/dev/null; then
             missing+=("xcode-select (请运行: xcode-select --install)")
@@ -83,8 +81,6 @@ check_dependencies() {
         return 0
     fi
     log_warn "发现缺失依赖: ${missing[*]}"
-    log_info "请运行以下命令安装缺失依赖后重试："
-    echo -e "\033[0;36m  brew install ${missing[*]} \033[0m" >&2
     if [[ "${1:-}" != "--ignore-missing" ]]; then
         exit 1
     fi
@@ -96,11 +92,9 @@ check_dependencies() {
 # =============================================================================
 diagnose_simple() {
     log_info "=== 简单诊断 ==="
-    echo ""
     echo "系统信息:"
     echo "  macOS版本: $(sw_vers -productVersion 2>/dev/null || echo 'Unknown')"
     echo "  芯片类型: $(uname -m)"
-    echo "  内存: $(sysctl -n hw.memsize 2>/dev/null | awk '{printf "%.1f GB", $1/1073741824}' || echo 'N/A')"
     echo ""
     echo "组件安装状态:"
     for key in "${COMP_KEYS[@]}"; do
@@ -108,29 +102,16 @@ diagnose_simple() {
         if [ -d "${INSTALL_DIR}/${key}" ]; then log_success "${name}: 已安装"
         else log_warn "${name}: 未安装"; fi
     done
-    echo ""
-    echo "端口占用情况:"
-    local ports=(8080 8000 3000 8081 8082 8188)
-    for port in "${ports[@]}"; do
-        if command -v lsof &>/dev/null && lsof -i :${port} -t &>/dev/null; then
-            log_warn "端口 ${port} 被占用"
-        else
-            log_success "端口 ${port} 空闲"
-        fi
-    done
     log_success "简单诊断完成"
 }
 
 diagnose_deep() {
     diagnose_simple
     echo ""
-    echo "网络连通性测试 (GitHub/HuggingFace/PyPI):"
+    echo "网络连通性测试:"
     for url in "github.com" "huggingface.co" "pypi.org"; do
-        if curl -sI --max-time 5 "https://${url}" &>/dev/null; then
-            log_success "${url}: 可达"
-        else
-            log_error "${url}: 不可达 (请检查网络/代理)"
-        fi
+        if curl -sI --max-time 5 "https://${url}" &>/dev/null; then log_success "${url}: 可达"
+        else log_error "${url}: 不可达"; fi
     done
     log_success "深度诊断完成"
 }
@@ -143,10 +124,7 @@ setup_venv() {
     local venv_python="${dir}/venv/bin/python"
     if [ ! -f "$venv_python" ]; then
         log_info "创建 Python 虚拟环境: ${dir}/venv"
-        if ! python3 -m venv "${dir}/venv" 2>&1; then
-            log_error "虚拟环境创建失败"
-            return 1
-        fi
+        if ! python3 -m venv "${dir}/venv" 2>&1; then return 1; fi
         "${dir}/venv/bin/pip" install --upgrade pip setuptools wheel -i "$PIP_INDEX" --trusted-host "$PIP_TRUSTED" &>/dev/null || true
     fi
     VENV_PIP="${dir}/venv/bin/pip"
@@ -163,7 +141,6 @@ deploy_component() {
     log_info "开始部署 ${name}..."
     mkdir -p "${INSTALL_DIR}" "${LOG_DIR}" "${BACKUP_DIR}"
     
-    # 🌟 核心修复 5：增加 || return 1，确保子函数失败时立即中断，不打印 SUCCESS
     case "$key" in
         open-webui) deploy_open_webui "$repo_url" || return 1 ;;
         sillytavern) deploy_sillytavern "$repo_url" || return 1 ;;
@@ -178,7 +155,6 @@ deploy_component() {
     log_success "${name} 部署完成"
 }
 
-# 通用克隆逻辑：自动清理残留目录 + 使用 GIT_NET_OPTS 防 CANCEL + 禁用密码提示
 safe_git_clone() {
     local repo_url="$1" dir="$2"
     if [ -d "${dir}" ] && [ ! -d "${dir}/.git" ]; then
@@ -187,7 +163,6 @@ safe_git_clone() {
     fi
     if [ ! -d "${dir}/.git" ]; then
         log_info "克隆 ${repo_url}..."
-        # 🌟 核心修复 6：使用数组展开传入网络优化参数
         if ! git "${GIT_NET_OPTS[@]}" clone --depth 1 "${repo_url}" "${dir}"; then
             log_error "克隆失败 (网络错误或仓库不存在)"
             return 1
@@ -203,7 +178,6 @@ deploy_open_webui() {
     if ! setup_venv "${dir}"; then return 1; fi
     log_info "安装 Open WebUI 依赖 (包含 PyTorch，可能需要 10-30 分钟)..."
     if ! "$VENV_PIP" install -e . -i "$PIP_INDEX" --trusted-host "$PIP_TRUSTED"; then
-        log_warn "镜像源安装失败，尝试官方源..."
         "$VENV_PIP" install -e . || { log_error "依赖安装失败"; return 1; }
     fi
     cat > start.sh << 'EOF'
@@ -219,7 +193,6 @@ deploy_sillytavern() {
     local repo_url="$1" dir="${INSTALL_DIR}/sillytavern"
     safe_git_clone "$repo_url" "$dir" || return 1
     cd "${dir}" || return 1
-    log_info "安装 Node.js 依赖..."
     npm install --silent 2>/dev/null || npm install || { log_error "npm install 失败"; return 1; }
     cat > start.sh << 'EOF'
 #!/bin/bash
@@ -248,7 +221,6 @@ deploy_faas() {
     safe_git_clone "$repo_url" "$dir" || return 1
     cd "${dir}" || return 1
     if ! command -v faas-cli &>/dev/null; then
-        log_info "安装 faas-cli..."
         brew install openfaas/tap/faas-cli 2>&1 || { log_error "faas-cli 安装失败"; return 1; }
     fi
     cat > start.sh << 'EOF'
@@ -264,7 +236,6 @@ deploy_browser_use() {
     safe_git_clone "$repo_url" "$dir" || return 1
     cd "${dir}" || return 1
     if ! setup_venv "${dir}"; then return 1; fi
-    log_info "安装 Browser Use 依赖..."
     "$VENV_PIP" install -e . -i "$PIP_INDEX" --trusted-host "$PIP_TRUSTED" 2>&1 || log_warn "pip install 警告"
     "$VENV_PIP" install playwright -i "$PIP_INDEX" --trusted-host "$PIP_TRUSTED" 2>&1
     ./venv/bin/playwright install chromium 2>/dev/null || true
@@ -282,7 +253,6 @@ deploy_mlx() {
     safe_git_clone "$repo_url" "$dir" || return 1
     cd "${dir}" || return 1
     if ! setup_venv "${dir}"; then return 1; fi
-    log_info "安装 MLX 及示例..."
     "$VENV_PIP" install mlx mlx-examples -i "$PIP_INDEX" --trusted-host "$PIP_TRUSTED" 2>&1 || log_warn "MLX 安装警告"
 }
 
@@ -291,7 +261,6 @@ deploy_comfyui() {
     safe_git_clone "$repo_url" "$dir" || return 1
     cd "${dir}" || return 1
     if ! setup_venv "${dir}"; then return 1; fi
-    log_info "安装 ComfyUI 依赖..."
     if [[ -f "requirements.txt" ]]; then
         "$VENV_PIP" install -r requirements.txt -i "$PIP_INDEX" --trusted-host "$PIP_TRUSTED" 2>&1 || log_warn "依赖安装警告"
     fi
@@ -310,17 +279,38 @@ deploy_mlx_video() {
     cd "${dir}" || return 1
     if ! setup_venv "${dir}"; then return 1; fi
     if [[ -f "requirements.txt" ]]; then
-        log_info "安装 MLX-Video 依赖..."
         "$VENV_PIP" install -r requirements.txt -i "$PIP_INDEX" --trusted-host "$PIP_TRUSTED" 2>&1 || log_warn "依赖安装警告"
     else
         "$VENV_PIP" install mlx -i "$PIP_INDEX" --trusted-host "$PIP_TRUSTED" 2>&1
     fi
-    log_info "MLX-Video 部署完成 (本地计算框架，无服务端口)"
 }
 
 # =============================================================================
-# 服务管理
+# 🌟 服务管理 (核心修复：恢复端口检测与自动打开浏览器)
 # =============================================================================
+wait_for_service() {
+    local port="$1"
+    local retries=0 max_retries=30
+    while (( retries < max_retries )); do
+        # 优先使用 HTTP 状态码检测
+        if command -v curl &>/dev/null; then
+            local http_code
+            http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 2 "http://localhost:${port}" 2>/dev/null)
+            if [[ "$http_code" =~ ^(200|301|302|303|307|401|403|404)$ ]]; then
+                return 0
+            fi
+        fi
+        # 降级: 检查端口监听
+        if command -v lsof &>/dev/null && lsof -i :${port} -t &>/dev/null; then
+            sleep 1
+            return 0
+        fi
+        sleep 1
+        ((retries++))
+    done
+    return 1
+}
+
 start_service() {
     local key="$1"
     IFS='|' read -r name _ port default_url <<< "${COMPONENTS[$key]}"
@@ -333,7 +323,19 @@ start_service() {
         nohup ./start.sh >> "${LOG_DIR}/${key}.log" 2>&1 &
         local pid=$!
         echo "$pid" > "${LOG_DIR}/${key}.pid"
-        log_success "${name} 已在后台启动 (PID: ${pid})"
+        
+        log_info "等待服务就绪 (最多 30s)..."
+        if wait_for_service "$port"; then
+            log_success "${name} 已在端口 ${port} 启动 (PID: ${pid})"
+            # 🌟 核心修复：自动打开浏览器 (macOS)
+            if command -v open &>/dev/null; then
+                log_info "正在打开浏览器: ${default_url}"
+                open "${default_url}" 2>/dev/null || true
+            fi
+        else
+            log_error "${name} 启动超时，请查看日志: ${LOG_DIR}/${key}.log"
+            log_warn "调试: tail -50 ${LOG_DIR}/${key}.log"
+        fi
     else
         log_info "${name} 为本地框架，无需启动后台服务。"
     fi
@@ -371,8 +373,6 @@ update_component() {
     local dir="${INSTALL_DIR}/${key}"
     cd "$dir" || { log_error "目录不存在: $dir"; return 1; }
     
-    log_info "拉取最新代码..."
-    # 🌟 核心修复 7：更新时也使用 HTTP/1.1 防止 CANCEL
     if ! git "${GIT_NET_OPTS[@]}" pull --quiet origin main 2>/dev/null && \
        ! git "${GIT_NET_OPTS[@]}" pull --quiet origin master 2>/dev/null && \
        ! git "${GIT_NET_OPTS[@]}" pull --quiet 2>/dev/null; then
@@ -383,13 +383,11 @@ update_component() {
     case "$key" in
         open-webui|browser-use|comfyui|mlx|mlx-video)
             if [[ -f "requirements.txt" ]] || [[ -f "setup.py" ]] || [[ -f "pyproject.toml" ]]; then
-                log_info "更新 Python 依赖..."
                 if ! setup_venv "$dir"; then return 1; fi
                 "$VENV_PIP" install -e . --upgrade -i "$PIP_INDEX" --trusted-host "$PIP_TRUSTED" 2>&1 || log_warn "pip upgrade 警告"
             fi
             ;;
         sillytavern|continue-dev)
-            log_info "更新 Node.js 依赖..."
             npm install --silent 2>/dev/null || npm install || log_warn "npm install 警告"
             ;;
     esac
@@ -397,9 +395,7 @@ update_component() {
 }
 
 rollback_component() {
-    local key="$1"
-    IFS='|' read -r name _ _ _ <<< "${COMPONENTS[$key]}"
-    log_warn "回退功能需要手动备份支持，当前版本暂略过复杂交互，请使用 git reset 回退。"
+    log_warn "回退功能请使用 git reset 手动回退。"
 }
 
 # =============================================================================
@@ -429,8 +425,6 @@ uninstall_component() {
         rm -rf "${INSTALL_DIR}/${key}"
         rm -f "${LOG_DIR}/${key}.log"* "${LOG_DIR}/${key}.pid"
         log_success "${name} 已卸载"
-    else
-        log_info "取消卸载"
     fi
 }
 
@@ -455,37 +449,27 @@ show_menu() {
     echo "=================================================="
     echo ""
     echo "📦 部署管理:"
-    echo "   1. 首次部署 (全部组件)"
-    echo "   2. 选择性部署 (单个组件)"
+    echo "   1. 首次部署 (全部组件)   2. 选择性部署 (单个组件)"
     echo ""
     echo "🚀 服务管理:"
-    echo "   3. 启动全部服务"
-    echo "   4. 停止全部服务"
-    echo "   5. 启动单个服务"
-    echo "   6. 停止单个服务"
+    echo "   3. 启动全部服务          4. 停止全部服务"
+    echo "   5. 启动单个服务          6. 停止单个服务"
     echo ""
     echo "📊 状态与诊断:"
-    echo "   7. 查看组件状态"
-    echo "   8. 简单系统诊断"
+    echo "   7. 查看组件状态          8. 简单系统诊断"
     echo "   9. 深度系统诊断"
     echo ""
     echo "🔄 更新与回退:"
-    echo "  10. 更新全部组件"
-    echo "  11. 更新前端组件 (WebUI/ST/Continue/ComfyUI)"
-    echo "  12. 更新 Agent 组件 (BrowserUse/FaaS/MLX)"
-    echo "  13. 更新模型组件 (MLX/MLX-Video/ComfyUI)"
-    echo "  14. 版本回退 (单个组件)"
+    echo "  10. 更新全部组件         14. 版本回退 (单个组件)"
     echo ""
     echo "🗑️  清理管理:"
-    echo "  15. 卸载单个组件"
-    echo "  16. 完全卸载 (全部)"
+    echo "  15. 卸载单个组件         16. 完全卸载 (全部)"
     echo ""
     echo "   0. 退出"
     echo "=================================================="
     echo ""
 }
 
-# 🌟 核心修复 8：使用全局变量 SELECTED_COMPONENT 返回结果，并将菜单输出重定向到 stderr (>&2)
 select_component() {
     SELECTED_COMPONENT=""
     echo "可用组件列表:" >&2
@@ -513,7 +497,7 @@ main() {
         case "$choice" in
             1) check_dependencies "--ignore-missing"
                for k in "${COMP_KEYS[@]}"; do deploy_component "$k" || true; done ;;
-            2) if ! select_component; then log_error "无效选择"; continue; fi
+            2) if ! select_component; then continue; fi
                check_dependencies "--ignore-missing"
                deploy_component "$SELECTED_COMPONENT" ;;
             3) start_all_services ;;
@@ -537,9 +521,6 @@ main() {
     done
 }
 
-# =============================================================================
-# CLI 入口
-# =============================================================================
 case "${1:-}" in
     --help|-h) echo "用法: $0 [--deploy-all|--start-all|--stop-all]"; exit 0 ;;
     --deploy-all) check_dependencies "--ignore-missing"
