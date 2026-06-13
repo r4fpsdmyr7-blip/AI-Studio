@@ -6,7 +6,7 @@
 #       MLX, ComfyUI (SDXL/FLUX), MLX-Video 的部署、更新、诊断与卸载
 # 作者：AI Assistant
 # 日期：2026-06-01
-# 版本：1.1.1 (Fixed stability, macOS compatibility & interactive safety)
+# 版本：1.2.0 (Stability, Security & macOS Compatibility Enhanced)
 # =============================================================================
 set -uo pipefail
 
@@ -22,14 +22,13 @@ if [[ ${BASH_VERSINFO[0]} -lt 4 ]]; then
     exit 1
 fi
 
-readonly SCRIPT_VERSION="1.1.1"
+readonly SCRIPT_VERSION="1.2.0"
 readonly INSTALL_DIR="${HOME}/ai-studio"
 readonly LOG_DIR="${INSTALL_DIR}/logs"
 readonly BACKUP_DIR="${INSTALL_DIR}/backups"
 
 # 固定遍历顺序，解决 Bash 关联数组无序问题
 readonly COMP_KEYS=(open-webui sillytavern continue-dev faas browser-use mlx comfyui mlx-video)
-
 declare -A COMPONENTS=(
 [open-webui]="Open WebUI|https://github.com/open-webui/open-webui.git|8080|http://localhost:8080"
 [sillytavern]="SillyTavern|https://github.com/SillyTavern/SillyTavern.git|8000|http://localhost:8000"
@@ -42,7 +41,7 @@ declare -A COMPONENTS=(
 )
 
 # =============================================================================
-# 工具函数 (日志输出至 stderr 避免污染返回值)
+# 工具函数
 # =============================================================================
 log_info()    { echo -e "\033[0;34m[INFO]\033[0m $1" >&2; }
 log_success() { echo -e "\033[0;32m[SUCCESS]\033[0m $1" >&2; }
@@ -51,22 +50,18 @@ log_error()   { echo -e "\033[0;31m[ERROR]\033[0m $1" >&2; }
 
 check_dependencies() {
     log_info "检查系统依赖..."
-    local deps=("git" "python3" "node" "npm" "curl")
+    local deps=("git" "python3" "node" "npm" "curl" "brew")
     local missing=()
     for dep in "${deps[@]}"; do
         command -v "$dep" &> /dev/null || missing+=("$dep")
     done
-
     if [ ${#missing[@]} -eq 0 ]; then
         log_success "所有基础依赖已满足"
         return 0
     fi
-
     log_warn "发现缺失依赖: ${missing[*]}"
     log_info "请运行以下命令安装缺失依赖后重试："
     echo -e "\033[0;36m  brew install ${missing[*]} \033[0m"
-    
-    # 非交互模式下直接退出，避免后续命令连锁失败
     if [[ "${1:-}" != "--ignore-missing" ]]; then
         exit 1
     fi
@@ -84,10 +79,15 @@ diagnose_simple() {
     echo "  内存: $(sysctl -n hw.memsize 2>/dev/null | awk '{printf "%.1f GB", $1/1073741824}')"
     echo ""
     echo "依赖检查:"
-    local deps=("brew" "git" "python3" "node")
+    local deps=("brew" "git" "python3" "node" "docker")
     for dep in "${deps[@]}"; do
         if command -v "$dep" &> /dev/null; then
-            log_success "$dep: $($dep --version 2>/dev/null | head -1 || echo 'Installed')"
+            if [[ "$dep" == "docker" ]]; then
+                if docker info &>/dev/null; then log_success "$dep: 运行中"
+                else log_warn "$dep: 已安装但未运行"; fi
+            else
+                log_success "$dep: $($dep --version 2>/dev/null | head -1 || echo 'Installed')"
+            fi
         else
             log_error "$dep: 未安装"
         fi
@@ -157,7 +157,6 @@ deploy_component() {
     IFS='|' read -r name repo_url port _ <<< "${COMPONENTS[$key]}"
     log_info "开始部署 ${name}..."
     mkdir -p "${INSTALL_DIR}" "${LOG_DIR}" "${BACKUP_DIR}"
-    
     case "$key" in
         open-webui) deploy_open_webui "$repo_url" ;;
         sillytavern) deploy_sillytavern "$repo_url" ;;
@@ -178,9 +177,8 @@ setup_venv() {
     local venv_pip="${dir}/venv/bin/pip"
     if [ ! -f "$venv_python" ]; then
         log_info "创建 Python 虚拟环境..."
-        python3 -m venv "${dir}/venv"
+        python3 -m venv "${dir}/venv" || { log_error "虚拟环境创建失败，请检查 python3-venv 模块"; return 1; }
     fi
-    # 仅输出路径，日志已重定向至 stderr
     echo "${venv_pip}"
 }
 
@@ -188,7 +186,8 @@ deploy_open_webui() {
     local repo_url="$1" dir="${INSTALL_DIR}/open-webui"
     [ -d "${dir}" ] || { log_info "克隆 Open WebUI..."; git clone "${repo_url}" "${dir}"; }
     cd "${dir}"
-    local pip=$(setup_venv "${dir}")
+    local pip
+    pip=$(setup_venv "${dir}") || return 1
     "$pip" install -e . --quiet
     cat > start.sh << 'EOF'
 #!/bin/bash
@@ -232,13 +231,17 @@ deploy_faas() {
     local repo_url="$1" dir="${INSTALL_DIR}/faas"
     [ -d "${dir}" ] || { log_info "克隆 FaaS..."; git clone "${repo_url}" "${dir}"; }
     cd "${dir}"
+    if ! command -v docker &> /dev/null || ! docker info &> /dev/null; then
+        log_warn "OpenFaaS 需要 Docker 运行环境。请确保 Docker Desktop 已启动。"
+    fi
     if ! command -v faas-cli &> /dev/null; then
-        log_info "安装 faas-cli (需 sudo 权限)..."
-        brew install openfaas/tap/faas-cli || { log_error "faas-cli 安装失败，请手动运行: brew install openfaas/tap/faas-cli"; return 1; }
+        log_info "安装 faas-cli..."
+        brew install openfaas/tap/faas-cli || { log_error "faas-cli 安装失败"; return 1; }
     fi
     cat > start.sh << 'EOF'
 #!/bin/bash
 cd "$(dirname "$0")"
+# 注意: 需确保目录内存在有效的 stack.yml 文件
 faas-cli up --port 8081
 EOF
     chmod +x start.sh
@@ -248,7 +251,8 @@ deploy_browser_use() {
     local repo_url="$1" dir="${INSTALL_DIR}/browser-use"
     [ -d "${dir}" ] || { log_info "克隆 Browser Use..."; git clone "${repo_url}" "${dir}"; }
     cd "${dir}"
-    local pip=$(setup_venv "${dir}")
+    local pip
+    pip=$(setup_venv "${dir}") || return 1
     "$pip" install -e . --quiet
     "$pip" install playwright --quiet
     ./venv/bin/playwright install --with-deps 2>/dev/null || true
@@ -256,7 +260,7 @@ deploy_browser_use() {
 #!/bin/bash
 cd "$(dirname "$0")"
 source venv/bin/activate
-python -m browser_use.server --host 0.0.0.0 --port 8082
+python -m browser_use.server --host 0.0.0.0 --port 8082 || python main.py --port 8082
 EOF
     chmod +x start.sh
 }
@@ -265,7 +269,8 @@ deploy_mlx() {
     local repo_url="$1" dir="${INSTALL_DIR}/mlx"
     [ -d "${dir}" ] || { log_info "克隆 MLX..."; git clone "${repo_url}" "${dir}"; }
     cd "${dir}"
-    local pip=$(setup_venv "${dir}")
+    local pip
+    pip=$(setup_venv "${dir}") || return 1
     "$pip" install mlx mlx-examples --quiet
     log_info "MLX 部署完成 (本地计算框架，无服务端口)"
 }
@@ -274,7 +279,8 @@ deploy_comfyui() {
     local repo_url="$1" dir="${INSTALL_DIR}/comfyui"
     [ -d "${dir}" ] || { log_info "克隆 ComfyUI..."; git clone "${repo_url}" "${dir}"; }
     cd "${dir}"
-    local pip=$(setup_venv "${dir}")
+    local pip
+    pip=$(setup_venv "${dir}") || return 1
     "$pip" install -r requirements.txt --quiet
     cat > start.sh << 'EOF'
 #!/bin/bash
@@ -289,7 +295,8 @@ deploy_mlx_video() {
     local repo_url="$1" dir="${INSTALL_DIR}/mlx-video"
     [ -d "${dir}" ] || { log_info "克隆 MLX-Video..."; git clone "${repo_url}" "${dir}"; }
     cd "${dir}"
-    local pip=$(setup_venv "${dir}")
+    local pip
+    pip=$(setup_venv "${dir}") || return 1
     if [ -f "requirements.txt" ]; then
         "$pip" install -r requirements.txt --quiet
     else
@@ -305,7 +312,14 @@ wait_for_service() {
     local port="$1"
     local retries=0 max_retries=20
     while (( retries < max_retries )); do
-        if lsof -i :${port} -t &> /dev/null; then return 0; fi
+        # 优先使用 HTTP 状态码检测，更准确反映 Web 服务就绪状态
+        if command -v curl &>/dev/null && curl -sf -o /dev/null -w "%{http_code}" "http://localhost:${port}" 2>/dev/null | grep -qE "200|301|302|401"; then
+            return 0
+        fi
+        # 降级方案：端口监听检测
+        if lsof -i :${port} -t &> /dev/null; then
+            return 0
+        fi
         sleep 1
         ((retries++))
     done
@@ -316,17 +330,19 @@ start_service() {
     local key="$1"
     IFS='|' read -r name _ port default_url <<< "${COMPONENTS[$key]}"
     log_info "启动 ${name}..."
-    if [ ! -f "${INSTALL_DIR}/${key}/start.sh" ]; then
+    
+    # N/A 端口组件跳过 start.sh 检查
+    if [ "$port" != "N/A" ] && [ ! -f "${INSTALL_DIR}/${key}/start.sh" ]; then
         log_error "${name} 未部署或启动脚本不存在"
         return 1
     fi
-    cd "${INSTALL_DIR}/${key}"
-    nohup ./start.sh > "${LOG_DIR}/${key}.log" 2>&1 &
-    local pid=$!
-    echo "$pid" > "${LOG_DIR}/${key}.pid"
-    
-    log_info "等待服务就绪 (最多 20s)..."
+
     if [ "$port" != "N/A" ]; then
+        cd "${INSTALL_DIR}/${key}"
+        nohup ./start.sh > "${LOG_DIR}/${key}.log" 2>&1 &
+        local pid=$!
+        echo "$pid" > "${LOG_DIR}/${key}.pid"
+        log_info "等待服务就绪 (最多 20s)..."
         if wait_for_service "$port"; then
             log_success "${name} 已在端口 ${port} 启动"
             open "${default_url}" 2>/dev/null || true
@@ -334,8 +350,8 @@ start_service() {
             log_error "${name} 启动超时，请查看日志: ${LOG_DIR}/${key}.log"
         fi
     else
-        sleep 2
-        log_success "${name} 已就绪 (本地库)"
+        log_info "${name} 为本地计算框架/示例库，无需启动后台服务。"
+        log_info "请进入 ${INSTALL_DIR}/${key} 参考官方文档运行示例。"
     fi
 }
 
@@ -365,7 +381,7 @@ stop_service() {
 start_all_services() {
     log_info "启动所有已部署的服务..."
     for key in "${COMP_KEYS[@]}"; do
-        [ -f "${INSTALL_DIR}/${key}/start.sh" ] && start_service "$key"
+        [ -d "${INSTALL_DIR}/${key}" ] && start_service "$key"
     done
 }
 
@@ -385,16 +401,21 @@ update_component() {
     log_info "更新 ${name}..."
     cd "${INSTALL_DIR}/${key}" || return 1
     
+    # 处理脏工作区
+    if ! git diff-index --quiet HEAD -- 2>/dev/null; then
+        log_warn "发现未提交的修改，自动暂存以便更新..."
+        git stash push -m "ai-studio-auto-stash-$(date +%s)" --quiet
+    fi
+
     local timestamp=$(date +%Y%m%d_%H%M%S)
-    # 排除重型目录加速备份
     tar -czf "${BACKUP_DIR}/${key}_${timestamp}.tar.gz" \
         --exclude='venv' --exclude='node_modules' --exclude='__pycache__' --exclude='models' --exclude='*.pth' . 2>/dev/null || true
-        
+    
     if ! git pull --quiet origin main 2>/dev/null; then
         log_warn "git pull 失败，尝试拉取当前跟踪分支..."
         git pull --quiet 2>/dev/null || log_error "代码更新失败，请检查网络连接或本地修改"
     fi
-    
+
     case "$key" in
         open-webui|browser-use|comfyui|mlx|mlx-video)
             ./venv/bin/pip install -e . --upgrade --quiet
@@ -416,12 +437,10 @@ rollback_component() {
     shopt -s nullglob
     local backups=("${BACKUP_DIR}/${key}_"*.tar.gz)
     shopt -u nullglob
-    
     if [ ${#backups[@]} -eq 0 ]; then
         log_error "没有可用的备份版本"
         return 1
     fi
-    
     echo "可用备份:"
     for i in "${!backups[@]}"; do
         echo "  $((i+1)). $(basename "${backups[$i]}")"
@@ -431,8 +450,8 @@ rollback_component() {
     if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#backups[@]} )); then
         stop_service "$key"
         cd "${INSTALL_DIR}/${key}" || return 1
-        # 清理现有文件再解压，避免旧文件残留
-        rm -rf ./* ./.[!.]* 2>/dev/null || true
+        # 安全清理：删除当前目录下所有文件，保留隐藏配置(如 .git)
+        find . -mindepth 1 -not -path './.git' -not -path './.git/*' -delete 2>/dev/null || true
         tar -xzf "${backups[$((choice-1))]}"
         log_success "${name} 已回退到备份版本，请重新启动服务"
     else
@@ -462,7 +481,8 @@ show_status() {
     done
     echo ""
     echo "Python/Node 内存占用 (Top 5):"
-    ps aux | awk '/[n]ode|[p]ython/ {cmd=""; for(i=11;i<=NF;i++) cmd=cmd" "$i; printf "  %-30s %6.1f MB\n", cmd, $6/1024}' | sort -k2 -rn | head -5
+    # 兼容 macOS BSD ps 输出格式 (RSS 为第 6 列，单位 KB)
+    ps aux | grep -E '[n]ode|[p]ython' | awk '{cmd=""; for(i=11;i<=NF;i++) cmd=cmd" "$i; printf "  %-30s %6.1f MB\n", cmd, $6/1024}' | sort -k2 -rn | head -5
     echo ""
 }
 
@@ -472,7 +492,6 @@ uninstall_component() {
     log_warn "卸载 ${name} 将删除其所有数据（含模型/配置）。"
     read -p "确定继续？(yes/no): " confirm
     if [[ "$confirm" != "yes" ]]; then log_info "取消卸载"; return 0; fi
-    
     log_info "正在卸载 ${name}..."
     stop_service "$key"
     rm -rf "${INSTALL_DIR}/${key}"
