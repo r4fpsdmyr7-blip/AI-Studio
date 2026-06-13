@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # =============================================================================
-# AI Studio Manager for macOS (Optimized)
+# AI Studio Manager for macOS (Optimized & Fixed)
 # =============================================================================
 # 功能：管理 Open WebUI, SillyTavern, Continue.dev, FaaS, Browser Use,
 #       MLX, ComfyUI (SDXL/FLUX), MLX-Video 的部署、更新、诊断与卸载
 # 作者：AI Assistant
 # 日期：2026-06-01
-# 版本：1.1.0 (Optimized for macOS & Robustness)
+# 版本：1.1.1 (Fixed stability, macOS compatibility & interactive safety)
 # =============================================================================
-set -euo pipefail
+set -uo pipefail
 
 # =============================================================================
-# 前置检查：macOS 默认 Bash 3.2 不支持 declare -A
+# 前置检查
 # =============================================================================
 if [[ ${BASH_VERSINFO[0]} -lt 4 ]]; then
     echo -e "\033[0;31m[ERROR]\033[0m 此脚本需要 Bash 4.0 或更高版本。macOS 默认 Bash 为 3.2。"
@@ -22,13 +22,14 @@ if [[ ${BASH_VERSINFO[0]} -lt 4 ]]; then
     exit 1
 fi
 
-readonly SCRIPT_VERSION="1.1.0"
+readonly SCRIPT_VERSION="1.1.1"
 readonly INSTALL_DIR="${HOME}/ai-studio"
 readonly LOG_DIR="${INSTALL_DIR}/logs"
 readonly BACKUP_DIR="${INSTALL_DIR}/backups"
-readonly CONFIG_FILE="${INSTALL_DIR}/config.json"
 
-# 组件配置 (名称|仓库URL|端口|默认访问地址)
+# 固定遍历顺序，解决 Bash 关联数组无序问题
+readonly COMP_KEYS=(open-webui sillytavern continue-dev faas browser-use mlx comfyui mlx-video)
+
 declare -A COMPONENTS=(
 [open-webui]="Open WebUI|https://github.com/open-webui/open-webui.git|8080|http://localhost:8080"
 [sillytavern]="SillyTavern|https://github.com/SillyTavern/SillyTavern.git|8000|http://localhost:8000"
@@ -41,16 +42,16 @@ declare -A COMPONENTS=(
 )
 
 # =============================================================================
-# 工具函数
+# 工具函数 (日志输出至 stderr 避免污染返回值)
 # =============================================================================
-log_info()    { echo -e "\033[0;34m[INFO]\033[0m $1"; }
-log_success() { echo -e "\033[0;32m[SUCCESS]\033[0m $1"; }
-log_warn()    { echo -e "\033[0;33m[WARN]\033[0m $1"; }
-log_error()   { echo -e "\033[0;31m[ERROR]\033[0m $1"; }
+log_info()    { echo -e "\033[0;34m[INFO]\033[0m $1" >&2; }
+log_success() { echo -e "\033[0;32m[SUCCESS]\033[0m $1" >&2; }
+log_warn()    { echo -e "\033[0;33m[WARN]\033[0m $1" >&2; }
+log_error()   { echo -e "\033[0;31m[ERROR]\033[0m $1" >&2; }
 
 check_dependencies() {
     log_info "检查系统依赖..."
-    local deps=("brew" "git" "python3" "pip3" "node" "npm" "wget" "curl")
+    local deps=("git" "python3" "node" "npm" "curl")
     local missing=()
     for dep in "${deps[@]}"; do
         command -v "$dep" &> /dev/null || missing+=("$dep")
@@ -61,18 +62,14 @@ check_dependencies() {
         return 0
     fi
 
-    log_info "发现缺失依赖: ${missing[*]}"
-    for dep in "${missing[@]}"; do
-        case "$dep" in
-            brew) /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" ;;
-            git|python3|pip3) brew install python ;; # Homebrew python 提供 python3/pip3
-            node|npm) brew install node ;;
-            wget) brew install wget ;;
-            curl) log_error "curl 是 macOS 内置工具，若缺失请检查系统完整性" ;;
-            *) log_error "无法自动安装 $dep，请手动安装后重试" ;;
-        esac
-    done
-    log_success "依赖安装完成"
+    log_warn "发现缺失依赖: ${missing[*]}"
+    log_info "请运行以下命令安装缺失依赖后重试："
+    echo -e "\033[0;36m  brew install ${missing[*]} \033[0m"
+    
+    # 非交互模式下直接退出，避免后续命令连锁失败
+    if [[ "${1:-}" != "--ignore-missing" ]]; then
+        exit 1
+    fi
 }
 
 # =============================================================================
@@ -87,17 +84,17 @@ diagnose_simple() {
     echo "  内存: $(sysctl -n hw.memsize 2>/dev/null | awk '{printf "%.1f GB", $1/1073741824}')"
     echo ""
     echo "依赖检查:"
-    local deps=("brew" "git" "python3" "pip3" "node" "npm")
+    local deps=("brew" "git" "python3" "node")
     for dep in "${deps[@]}"; do
         if command -v "$dep" &> /dev/null; then
-            log_success "$dep: $($dep --version 2>/dev/null | head -1)"
+            log_success "$dep: $($dep --version 2>/dev/null | head -1 || echo 'Installed')"
         else
             log_error "$dep: 未安装"
         fi
     done
     echo ""
     echo "组件安装状态:"
-    for key in "${!COMPONENTS[@]}"; do
+    for key in "${COMP_KEYS[@]}"; do
         IFS='|' read -r name _ _ _ <<< "${COMPONENTS[$key]}"
         if [ -d "${INSTALL_DIR}/${key}" ]; then log_success "${name}: 已安装"
         else log_warn "${name}: 未安装"; fi
@@ -106,8 +103,8 @@ diagnose_simple() {
     echo "端口占用情况:"
     local ports=(8080 8000 3000 8081 8082 8188)
     for port in "${ports[@]}"; do
-        if lsof -ti :${port} &> /dev/null; then
-            log_warn "端口 ${port} 被占用 (PID: $(lsof -ti :${port} | head -1))"
+        if lsof -i :${port} -t &> /dev/null; then
+            log_warn "端口 ${port} 被占用 (PID: $(lsof -i :${port} -t | head -1))"
         else
             log_success "端口 ${port} 空闲"
         fi
@@ -140,12 +137,12 @@ except ImportError:
 " 2>/dev/null || echo "  Python环境检查失败"
     fi
     echo ""
-    echo "网络连通性测试 (使用 curl 避免 macOS ping 参数差异):"
+    echo "网络连通性测试:"
     for url in "github.com" "huggingface.co" "pypi.org"; do
         if curl -s --head --max-time 3 "https://${url}" &> /dev/null; then
             log_success "${url}: 可达"
         else
-            log_error "${url}: 不可达"
+            log_error "${url}: 不可达 (请检查网络代理)"
         fi
     done
     echo ""
@@ -160,7 +157,7 @@ deploy_component() {
     IFS='|' read -r name repo_url port _ <<< "${COMPONENTS[$key]}"
     log_info "开始部署 ${name}..."
     mkdir -p "${INSTALL_DIR}" "${LOG_DIR}" "${BACKUP_DIR}"
-
+    
     case "$key" in
         open-webui) deploy_open_webui "$repo_url" ;;
         sillytavern) deploy_sillytavern "$repo_url" ;;
@@ -175,7 +172,6 @@ deploy_component() {
     log_success "${name} 部署完成"
 }
 
-# 统一虚拟环境创建辅助函数
 setup_venv() {
     local dir="$1"
     local venv_python="${dir}/venv/bin/python"
@@ -184,6 +180,7 @@ setup_venv() {
         log_info "创建 Python 虚拟环境..."
         python3 -m venv "${dir}/venv"
     fi
+    # 仅输出路径，日志已重定向至 stderr
     echo "${venv_pip}"
 }
 
@@ -192,7 +189,7 @@ deploy_open_webui() {
     [ -d "${dir}" ] || { log_info "克隆 Open WebUI..."; git clone "${repo_url}" "${dir}"; }
     cd "${dir}"
     local pip=$(setup_venv "${dir}")
-    "$pip" install -e ".[docker]" --quiet
+    "$pip" install -e . --quiet
     cat > start.sh << 'EOF'
 #!/bin/bash
 cd "$(dirname "$0")"
@@ -236,8 +233,8 @@ deploy_faas() {
     [ -d "${dir}" ] || { log_info "克隆 FaaS..."; git clone "${repo_url}" "${dir}"; }
     cd "${dir}"
     if ! command -v faas-cli &> /dev/null; then
-        log_info "安装 faas-cli..."
-        curl -sSL https://cli.openfaas.com | sudo sh
+        log_info "安装 faas-cli (需 sudo 权限)..."
+        brew install openfaas/tap/faas-cli || { log_error "faas-cli 安装失败，请手动运行: brew install openfaas/tap/faas-cli"; return 1; }
     fi
     cat > start.sh << 'EOF'
 #!/bin/bash
@@ -305,10 +302,10 @@ deploy_mlx_video() {
 # 服务管理
 # =============================================================================
 wait_for_service() {
-    local key="$1" port="$2"
+    local port="$1"
     local retries=0 max_retries=20
     while (( retries < max_retries )); do
-        if lsof -ti :${port} &> /dev/null; then return 0; fi
+        if lsof -i :${port} -t &> /dev/null; then return 0; fi
         sleep 1
         ((retries++))
     done
@@ -319,12 +316,10 @@ start_service() {
     local key="$1"
     IFS='|' read -r name _ port default_url <<< "${COMPONENTS[$key]}"
     log_info "启动 ${name}..."
-    
     if [ ! -f "${INSTALL_DIR}/${key}/start.sh" ]; then
         log_error "${name} 未部署或启动脚本不存在"
         return 1
     fi
-
     cd "${INSTALL_DIR}/${key}"
     nohup ./start.sh > "${LOG_DIR}/${key}.log" 2>&1 &
     local pid=$!
@@ -332,14 +327,14 @@ start_service() {
     
     log_info "等待服务就绪 (最多 20s)..."
     if [ "$port" != "N/A" ]; then
-        if wait_for_service "$key" "$port"; then
+        if wait_for_service "$port"; then
             log_success "${name} 已在端口 ${port} 启动"
             open "${default_url}" 2>/dev/null || true
         else
             log_error "${name} 启动超时，请查看日志: ${LOG_DIR}/${key}.log"
         fi
     else
-        sleep 2 # 本地库启动较快
+        sleep 2
         log_success "${name} 已就绪 (本地库)"
     fi
 }
@@ -348,15 +343,12 @@ stop_service() {
     local key="$1"
     IFS='|' read -r name _ _ _ <<< "${COMPONENTS[$key]}"
     log_info "停止 ${name}..."
-    
     if [ -f "${LOG_DIR}/${key}.pid" ]; then
         local pid
         read -r pid < "${LOG_DIR}/${key}.pid"
         if kill -0 "$pid" 2>/dev/null; then
             kill -TERM "$pid" 2>/dev/null || true
-            # 清理可能衍生的子进程
             pkill -P "$pid" 2>/dev/null || true
-            # 优雅等待
             local w=0
             while kill -0 "$pid" 2>/dev/null && (( w < 5 )); do sleep 1; ((w++)); done
             if kill -0 "$pid" 2>/dev/null; then kill -9 "$pid" 2>/dev/null || true; fi
@@ -372,14 +364,14 @@ stop_service() {
 
 start_all_services() {
     log_info "启动所有已部署的服务..."
-    for key in "${!COMPONENTS[@]}"; do
+    for key in "${COMP_KEYS[@]}"; do
         [ -f "${INSTALL_DIR}/${key}/start.sh" ] && start_service "$key"
     done
 }
 
 stop_all_services() {
     log_info "停止所有运行中的服务..."
-    for key in "${!COMPONENTS[@]}"; do
+    for key in "${COMP_KEYS[@]}"; do
         [ -f "${LOG_DIR}/${key}.pid" ] && stop_service "$key"
     done
 }
@@ -391,15 +383,16 @@ update_component() {
     local key="$1"
     IFS='|' read -r name repo_url _ _ <<< "${COMPONENTS[$key]}"
     log_info "更新 ${name}..."
-    cd "${INSTALL_DIR}/${key}"
+    cd "${INSTALL_DIR}/${key}" || return 1
     
     local timestamp=$(date +%Y%m%d_%H%M%S)
-    tar -czf "${BACKUP_DIR}/${key}_${timestamp}.tar.gz" . 2>/dev/null || true
-    
-    # 安全拉取代码
+    # 排除重型目录加速备份
+    tar -czf "${BACKUP_DIR}/${key}_${timestamp}.tar.gz" \
+        --exclude='venv' --exclude='node_modules' --exclude='__pycache__' --exclude='models' --exclude='*.pth' . 2>/dev/null || true
+        
     if ! git pull --quiet origin main 2>/dev/null; then
-        log_warn "git pull 失败，尝试当前分支..."
-        git pull --quiet 2>/dev/null || true
+        log_warn "git pull 失败，尝试拉取当前跟踪分支..."
+        git pull --quiet 2>/dev/null || log_error "代码更新失败，请检查网络连接或本地修改"
     fi
     
     case "$key" in
@@ -410,7 +403,7 @@ update_component() {
             npm install --quiet
             ;;
         faas)
-            curl -sSL https://cli.openfaas.com | sudo sh
+            brew upgrade openfaas/tap/faas-cli 2>/dev/null || true
             ;;
     esac
     log_success "${name} 更新完成"
@@ -420,7 +413,6 @@ rollback_component() {
     local key="$1"
     IFS='|' read -r name _ _ _ <<< "${COMPONENTS[$key]}"
     log_info "=== ${name} 版本回退 ==="
-    
     shopt -s nullglob
     local backups=("${BACKUP_DIR}/${key}_"*.tar.gz)
     shopt -u nullglob
@@ -438,7 +430,9 @@ rollback_component() {
     read -p "选择要回退的版本编号 (1-${#backups[@]}): " choice
     if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#backups[@]} )); then
         stop_service "$key"
-        cd "${INSTALL_DIR}/${key}"
+        cd "${INSTALL_DIR}/${key}" || return 1
+        # 清理现有文件再解压，避免旧文件残留
+        rm -rf ./* ./.[!.]* 2>/dev/null || true
         tar -xzf "${backups[$((choice-1))]}"
         log_success "${name} 已回退到备份版本，请重新启动服务"
     else
@@ -454,7 +448,7 @@ show_status() {
     echo ""
     printf "%-20s %-10s %-10s %-20s\n" "组件" "状态" "端口" "进程"
     printf "%-20s %-10s %-10s %-20s\n" "--------------------" "----------" "----------" "--------------------"
-    for key in "${!COMPONENTS[@]}"; do
+    for key in "${COMP_KEYS[@]}"; do
         IFS='|' read -r name _ port _ <<< "${COMPONENTS[$key]}"
         local status="未安装" pid_info="-"
         if [ -d "${INSTALL_DIR}/${key}" ]; then status="已安装"; fi
@@ -468,14 +462,18 @@ show_status() {
     done
     echo ""
     echo "Python/Node 内存占用 (Top 5):"
-    ps aux | grep -E "(node|python)" | grep -v grep | sort -k6 -rn | head -5 | awk '{printf "  %-30s %6.1f MB\n", $11, $6/1024}'
+    ps aux | awk '/[n]ode|[p]ython/ {cmd=""; for(i=11;i<=NF;i++) cmd=cmd" "$i; printf "  %-30s %6.1f MB\n", cmd, $6/1024}' | sort -k2 -rn | head -5
     echo ""
 }
 
 uninstall_component() {
     local key="$1"
     IFS='|' read -r name _ _ _ <<< "${COMPONENTS[$key]}"
-    log_info "卸载 ${name}..."
+    log_warn "卸载 ${name} 将删除其所有数据（含模型/配置）。"
+    read -p "确定继续？(yes/no): " confirm
+    if [[ "$confirm" != "yes" ]]; then log_info "取消卸载"; return 0; fi
+    
+    log_info "正在卸载 ${name}..."
     stop_service "$key"
     rm -rf "${INSTALL_DIR}/${key}"
     rm -f "${LOG_DIR}/${key}."*
@@ -487,7 +485,7 @@ uninstall_all() {
     read -p "确定要继续吗？(yes/no): " confirm
     if [[ "$confirm" == "yes" ]]; then
         stop_all_services
-        for key in "${!COMPONENTS[@]}"; do uninstall_component "$key"; done
+        for key in "${COMP_KEYS[@]}"; do uninstall_component "$key"; done
         rm -rf "${INSTALL_DIR}"
         log_success "所有组件已卸载"
     else
@@ -519,16 +517,16 @@ show_menu() {
 }
 
 select_component() {
-    local keys=("${!COMPONENTS[@]}")
     echo "可用组件:"
-    for i in "${!keys[@]}"; do
-        IFS='|' read -r name _ _ _ <<< "${COMPONENTS[${keys[$i]}]}"
+    for i in "${!COMP_KEYS[@]}"; do
+        local key="${COMP_KEYS[$i]}"
+        IFS='|' read -r name _ _ _ <<< "${COMPONENTS[$key]}"
         echo "  $((i+1)). ${name}"
     done
     echo ""
     read -p "选择组件编号: " choice
-    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#keys[@]} )); then
-        echo "${keys[$((choice-1))]}"
+    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#COMP_KEYS[@]} )); then
+        echo "${COMP_KEYS[$((choice-1))]}"
     fi
 }
 
@@ -537,8 +535,8 @@ main() {
         show_menu
         read -p "请选择操作 [0-16]: " choice
         case "$choice" in
-            1) check_dependencies; for k in "${!COMPONENTS[@]}"; do deploy_component "$k"; done; log_success "首次部署完成！" ;;
-            2) local k=$(select_component); [ -n "$k" ] && { check_dependencies; deploy_component "$k"; } || log_error "无效选择" ;;
+            1) check_dependencies "--ignore-missing"; for k in "${COMP_KEYS[@]}"; do deploy_component "$k"; done; log_success "首次部署完成！" ;;
+            2) local k=$(select_component); [ -n "$k" ] && { check_dependencies "--ignore-missing"; deploy_component "$k"; } || log_error "无效选择" ;;
             3) start_all_services ;;
             4) stop_all_services ;;
             5) local k=$(select_component); [ -n "$k" ] && start_service "$k" || log_error "无效选择" ;;
@@ -546,7 +544,7 @@ main() {
             7) show_status ;;
             8) diagnose_simple ;;
             9) diagnose_deep ;;
-            10) for k in "${!COMPONENTS[@]}"; do [ -d "${INSTALL_DIR}/${k}" ] && update_component "$k"; done ;;
+            10) for k in "${COMP_KEYS[@]}"; do [ -d "${INSTALL_DIR}/${k}" ] && update_component "$k"; done ;;
             11) for k in open-webui sillytavern continue-dev comfyui; do [ -d "${INSTALL_DIR}/${k}" ] && update_component "$k"; done ;;
             12) for k in browser-use faas mlx; do [ -d "${INSTALL_DIR}/${k}" ] && update_component "$k"; done ;;
             13) for k in mlx mlx-video comfyui; do [ -d "${INSTALL_DIR}/${k}" ] && update_component "$k"; done ;;
@@ -566,7 +564,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     echo "用法: $0 [选项]"
     echo "选项: --deploy-all | --start-all | --stop-all | --status | --diagnose-simple | --diagnose-deep"
     exit 0
-elif [[ "${1:-}" == "--deploy-all" ]]; then check_dependencies; for k in "${!COMPONENTS[@]}"; do deploy_component "$k"; done
+elif [[ "${1:-}" == "--deploy-all" ]]; then check_dependencies "--ignore-missing"; for k in "${COMP_KEYS[@]}"; do deploy_component "$k"; done
 elif [[ "${1:-}" == "--start-all" ]]; then start_all_services
 elif [[ "${1:-}" == "--stop-all" ]]; then stop_all_services
 elif [[ "${1:-}" == "--status" ]]; then show_status
