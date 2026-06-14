@@ -1,37 +1,231 @@
-#!/usr/bin/env bash
-show_banner() {
-    echo -e "${CLR_CYAN}${CLR_BOLD}"
-    echo "     _   ___    _____ _             _ _      "
-    echo "    / | / / |  / ____(_)           | | |     "
-    echo "   /  |/ /| | | (___  _ _ __   __ _| | |     "
-    echo "  / /|  / | |  \___ \| | '_ \ / _  | | |     "
-    echo " / / | /  | |  ____) | | | | | (_| | | |     "
-    echo "/_/  |/   |_| |_____/|_|_| |_|\__,_|_|_|     "
-    echo -e "${CLR_RESET}"
-    echo -e "${CLR_DIM}    AI Tools Unified Management Platform${CLR_RESET}"; echo ""
+#!/bin/bash
+
+# ============================================================================
+# AI Studio - User Interface Library (lib/ui.sh)
+# Provides lightweight, pure-Bash terminal UI components (progress bars, 
+# menus, tables, and prompts) compatible with macOS default environments.
+# ============================================================================
+
+# Ensure common functions (colors, logging) are available
+# This script expects to be sourced after lib/common.sh
+
+# ============================================================================
+# 1. Progress & Loading Indicators
+# ============================================================================
+
+# Display a text-based progress bar
+# Usage: show_progress 50 100 "Installing dependencies..."
+show_progress() {
+    local current="$1"
+    local total="$2"
+    local message="${3:-Processing}"
+    local width=40
+    
+    # Calculate percentage
+    local percent=$((current * 100 / total))
+    local filled=$((percent * width / 100))
+    local empty=$((width - filled))
+    
+    # Build bar strings
+    local bar_filled=""
+    local bar_empty=""
+    for ((i=0; i<filled; i++)); do bar_filled+="#"; done
+    for ((i=0; i<empty; i++)); do bar_empty+="-"; done
+    
+    # Print on the same line, overwriting previous output
+    printf "\r${COLOR_CYAN}[%s]${COLOR_RESET} %3d%% | ${COLOR_BOLD}%s${COLOR_RESET}" \
+        "${bar_filled}${bar_empty}" "$percent" "$message"
+    
+    # If complete, print a newline
+    if [[ "$current" -ge "$total" ]]; then
+        echo ""
+    fi
 }
-show_separator() { printf '%*s\n' "${2:-60}" '' | tr ' ' "${1:--}"; }
-show_main_menu() {
-    show_banner; show_separator "="
-    echo -e "  ${CLR_BOLD}请选择操作:${CLR_RESET}\n"
-    echo -e "  ${CLR_GREEN}1)${CLR_RESET}  deploy     - 首次部署"
-    echo -e "  ${CLR_GREEN}2)${CLR_RESET}  start      - 日常启动"
-    echo -e "  ${CLR_GREEN}3)${CLR_RESET}  stop       - 停止服务"
-    echo -e "  ${CLR_GREEN}4)${CLR_RESET}  status     - 查看状态"
-    echo -e "  ${CLR_GREEN}5)${CLR_RESET}  update     - 更新前端"
-    echo -e "  ${CLR_GREEN}6)${CLR_RESET}  agent      - Agent 管理"
-    echo -e "  ${CLR_GREEN}7)${CLR_RESET}  model      - 架构及模型"
-    echo -e "  ${CLR_GREEN}8)${CLR_RESET}  diagnose   - 自我诊断"
-    echo -e "  ${CLR_GREEN}9)${CLR_RESET}  uninstall  - 卸载"
-    echo -e "  ${CLR_GREEN}0)${CLR_RESET}  log        - 查看日志\n"
-    echo -e "  ${CLR_DIM}用法: ./ai-studio.sh <command> [component]${CLR_RESET}"
-    show_separator "="
+
+# Show a simple spinning loader (runs in background, requires caller to kill it)
+# Usage: show_spinner "Loading" & SPINNER_PID=$!; sleep 5; kill $SPINNER_PID 2>/dev/null; echo "Done"
+show_spinner() {
+    local message="${1:-Working}"
+    local spinstr='|/-\'
+    local temp
+    
+    while true; do
+        for (( i=0; i<${#spinstr}; i++ )); do
+            temp=${spinstr:$i:1}
+            printf "\r${COLOR_CYAN}[%s]${COLOR_RESET} %s..." "$temp" "$message"
+            sleep 0.1
+        done
+    done
 }
-info_box() {
-    local title="$1"; shift
-    show_separator "-"; echo -e "  ${CLR_BOLD}${CLR_CYAN}$title${CLR_RESET}"; show_separator "-"
-    for line in "$@"; do echo -e "  $line"; done; show_separator "-"
+
+# ============================================================================
+# 2. User Prompts & Confirmations
+# ============================================================================
+
+# Ask for user confirmation with a default option
+# Usage: if confirm_action "Are you sure you want to uninstall?" "Y"; then ...
+# Returns: 0 for Yes, 1 for No
+confirm_action() {
+    local prompt="$1"
+    local default="${2:-N}" # Default to 'N' for safety on destructive actions
+    local response
+    
+    # Format prompt based on default
+    if [[ "${default^^}" == "Y" ]]; then
+        prompt="${prompt} [Y/n]: "
+    else
+        prompt="${prompt} [y/N]: "
+    fi
+    
+    # Read input (timeout can be added with -t if needed, e.g., read -t 10)
+    read -r -p "$(echo -e "${COLOR_YELLOW}${prompt}${COLOR_RESET}")" response
+    
+    # Normalize response
+    response="${response:-$default}"
+    response="${response^^}" # Convert to uppercase
+    
+    if [[ "$response" == "Y" || "$response" == "YES" ]]; then
+        return 0
+    else
+        return 1
+    fi
 }
-success_box() { echo -e "\n  ${CLR_GREEN}${CLR_BOLD}✓ $1${CLR_RESET}\n"; }
-error_box() { echo -e "\n  ${CLR_RED}${CLR_BOLD}✗ $1${CLR_RESET}\n"; }
-print_table_row() { printf "  ${CLR_BOLD}%-18s${CLR_RESET} %-12s %-20s %s\n" "$1" "$2" "$3" "$4"; }
+
+# Prompt user to enter a value with validation
+# Usage: user_input "Enter port number: " "^[0-9]+$" "8080"
+user_input() {
+    local prompt="$1"
+    local regex="${2:-}"
+    local default="${3:-}"
+    local input
+    
+    while true; do
+        local display_prompt="$prompt"
+        if [[ -n "$default" ]]; then
+            display_prompt="${prompt} (default: $default): "
+        fi
+        
+        read -r -p "$(echo -e "${COLOR_CYAN}${display_prompt}${COLOR_RESET}")" input
+        
+        # Use default if empty
+        if [[ -z "$input" ]] && [[ -n "$default" ]]; then
+            input="$default"
+        fi
+        
+        # Validate against regex if provided
+        if [[ -n "$regex" ]]; then
+            if [[ "$input" =~ $regex ]]; then
+                echo "$input"
+                return 0
+            else
+                log_error "Invalid input. Please match the required format."
+            fi
+        else
+            echo "$input"
+            return 0
+        fi
+    done
+}
+
+# ============================================================================
+# 3. Selection Menus
+# ============================================================================
+
+# Display a numbered list and let the user select an item
+# Usage: select_from_list "Choose a component:" "open-webui" "sillytavern" "comfyui"
+# Returns: The selected string via stdout, or empty if cancelled
+select_from_list() {
+    local prompt="$1"
+    shift
+    local options=("$@")
+    local count=${#options[@]}
+    
+    if [[ $count -eq 0 ]]; then
+        log_error "No options provided to select_from_list."
+        return 1
+    fi
+    
+    echo ""
+    echo -e "${COLOR_BOLD}${prompt}${COLOR_RESET}"
+    echo "----------------------------------------"
+    
+    for ((i=0; i<count; i++)); do
+        printf "  %2d) %s\n" "$((i+1))" "${options[$i]}"
+    done
+    echo "   0) Cancel"
+    echo "----------------------------------------"
+    
+    local choice
+    while true; do
+        read -r -p "$(echo -e "${COLOR_CYAN}Enter your choice (0-$count): ${COLOR_RESET}")" choice
+        
+        # Validate input is a number
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 0 ]] && [[ "$choice" -le "$count" ]]; then
+            if [[ "$choice" -eq 0 ]]; then
+                echo "" # Return empty
+                return 1
+            else
+                echo "${options[$((choice-1))]}"
+                return 0
+            fi
+        else
+            log_error "Invalid selection. Please enter a number between 0 and $count."
+        fi
+    done
+}
+
+# ============================================================================
+# 4. Formatting & Tables
+# ============================================================================
+
+# Print a formatted table from newline-separated, space-delimited data
+# Usage: print_table "Name\tPort\tStatus\nopen-webui\t3000\tRunning"
+print_table() {
+    local data="$1"
+    
+    if [[ -z "$data" ]]; then
+        log_warn "No data provided for table."
+        return 0
+    fi
+    
+    # macOS BSD 'column' command is perfect for this. 
+    # -t: determine the number of columns, -s: separator (default is whitespace)
+    echo "$data" | column -t -s $'\t' | sed "s/^/  /" # Indent by 2 spaces
+}
+
+# Print a key-value info block (useful for component metadata or status)
+# Usage: print_info_block "Component Info" "Name: Open WebUI" "Port: 3000" "Status: Running"
+print_info_block() {
+    local title="$1"
+    shift
+    local items=("$@")
+    
+    echo ""
+    echo -e "${COLOR_BOLD}=== ${title} ===${COLOR_RESET}"
+    for item in "${items[@]}"; do
+        # Split by first colon for alignment
+        local key="${item%%:*}"
+        local value="${item#*:}"
+        printf "  ${COLOR_CYAN}%-15s${COLOR_RESET} : %s\n" "$key" "$value"
+    done
+    echo "========================="
+    echo ""
+}
+
+# ============================================================================
+# 5. Utility Wrappers for Progressive Disclosure
+# ============================================================================
+
+# Pause execution and wait for user to press Enter
+# Usage: pause_for_user "Press Enter to continue..."
+pause_for_user() {
+    local msg="${1:-Press Enter to continue...}"
+    read -r -s -p "$(echo -e "${COLOR_GRAY}${msg}${COLOR_RESET}")"
+    echo ""
+}
+
+# Clear the terminal screen safely
+clear_screen() {
+    clear
+    # Optional: print a welcome banner here if desired
+}
