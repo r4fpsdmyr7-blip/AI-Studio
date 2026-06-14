@@ -52,7 +52,7 @@ AI Studio 是一个基于 Bash 脚本的综合工具集，旨在简化 macOS 上
 ```bash
 # 1. Clone the repository / 克隆仓库
 git clone https://github.com/r4fpsdmyr7-blip/AI-Studio-Docs.git
-cd ai-studio
+cd ai-studio-docs
 
 # 2. Make the main script executable / 赋予主脚本执行权限
 chmod +x ai-studio.sh
