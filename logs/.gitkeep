@@ -1,0 +1,3 @@
+# This file ensures the 'logs' directory is tracked by Git.
+# AI Studio will write runtime logs and diagnosis reports here.
+# Do not delete this file.
