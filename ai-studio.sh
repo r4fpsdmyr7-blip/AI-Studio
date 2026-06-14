@@ -1,11 +1,13 @@
 #!/bin/bash
-
 # ============================================================================
 # AI Studio - Main Entry Script
 # A unified platform for managing and deploying AI tools
+# 
+# CRITICAL FIX: 
+# 1. Removed 'set -e' to prevent unexpected crashes during routing.
+# 2. Removed undefined 'init_logging' call.
+# 3. Fixed undefined 'show_all_components_status' and 'show_environment_status'.
 # ============================================================================
-
-set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export AI_STUDIO_ROOT="$SCRIPT_DIR"
@@ -25,7 +27,7 @@ VERSION="1.0.0"
 VERSION_DATE="2026-06-13"
 
 show_help() {
-    cat << EOF
+cat << EOF
 AI Studio v${VERSION}
 A unified platform for managing and deploying AI tools
 
@@ -53,7 +55,7 @@ Core Commands:
 
 Available Components:
   open-webui, sillytavern, continue-dev, fazm, browser-use,
-  mlx, comfyui, mlx-video, qwen3
+  mlx, comfyui, mlx-video, qwen3, model
 
 Examples:
   $(basename "$0") env check
@@ -62,7 +64,6 @@ Examples:
   $(basename "$0") status
   $(basename "$0") update comfyui --target models
   $(basename "$0") diagnose sillytavern --deep
-
 EOF
 }
 
@@ -72,7 +73,6 @@ show_version() {
 
 handle_env_command() {
     local subcommand="$1"
-    
     if [[ "$subcommand" == "check" ]]; then
         log_info "Starting environment check..."
         check_all_requirements
@@ -81,7 +81,12 @@ handle_env_command() {
         install_all_dependencies
     elif [[ "$subcommand" == "status" ]]; then
         log_info "Environment status:"
-        show_environment_status
+        # Fallback to check if show_environment_status is not defined in env-check.sh
+        if declare -f show_environment_status >/dev/null 2>&1; then
+            show_environment_status
+        else
+            check_all_requirements
+        fi
     else
         log_error "Unknown env subcommand: $subcommand"
         show_help
@@ -92,22 +97,23 @@ handle_env_command() {
 handle_component_command() {
     local command="$1"
     local component="$2"
-    shift 2
-    local args=("$@")
+    shift 2 || true # Shift safely
     
     # Validate component name
-    if [[ "$component" != "all" ]] && ! is_valid_component "$component"; then
-        log_error "Unknown component: $component"
-        log_info "Use '$(basename "$0") list' to see all available components"
-        exit 1
+    if [[ "$component" != "all" ]]; then
+        if ! is_valid_component "$component"; then
+            log_error "Unknown component: $component"
+            log_info "Use '$(basename "$0") list' to see all available components"
+            exit 1
+        fi
     fi
     
     # Get component script path
     local component_dir="$AI_STUDIO_ROOT/components/$component"
     local script_path="$component_dir/${command}.sh"
     
-    # Check if script exists
-    if [[ ! -f "$script_path" ]]; then
+    # Check if script exists (skip for 'all' operations)
+    if [[ "$component" != "all" ]] && [[ ! -f "$script_path" ]]; then
         log_error "Component $component does not support $command operation"
         exit 1
     fi
@@ -118,77 +124,73 @@ handle_component_command() {
             log_info "Installing all components..."
             for comp in $(get_all_components); do
                 log_info "Installing $comp..."
-                "$AI_STUDIO_ROOT/components/$comp/install.sh" "${args[@]}"
+                "$AI_STUDIO_ROOT/components/$comp/install.sh" "$@"
             done
         else
             log_info "Installing $component..."
-            "$script_path" "${args[@]}"
+            "$script_path" "$@"
         fi
-        
     elif [[ "$command" == "start" ]]; then
         if [[ "$component" == "all" ]]; then
             log_info "Starting all components..."
             for comp in $(get_all_components); do
                 log_info "Starting $comp..."
-                "$AI_STUDIO_ROOT/components/$comp/start.sh" "${args[@]}"
+                "$AI_STUDIO_ROOT/components/$comp/start.sh" "$@"
             done
         else
             log_info "Starting $component..."
-            "$script_path" "${args[@]}"
-            
-            # Auto-open browser
-            local port=$(get_component_port "$component")
-            if [[ -n "$port" ]]; then
-                log_info "Service started, opening browser..."
-                open_browser "http://localhost:$port"
-            fi
+            "$script_path" "$@"
+            # Note: The component's start.sh already handles opening the browser 
         fi
-        
     elif [[ "$command" == "stop" ]]; then
         if [[ "$component" == "all" ]]; then
             log_info "Stopping all components..."
             for comp in $(get_all_components); do
                 log_info "Stopping $comp..."
-                "$AI_STUDIO_ROOT/components/$comp/stop.sh" "${args[@]}"
+                "$AI_STUDIO_ROOT/components/$comp/stop.sh" "$@"
             done
         else
             log_info "Stopping $component..."
-            "$script_path" "${args[@]}"
+            "$script_path" "$@"
         fi
-        
     elif [[ "$command" == "restart" ]]; then
-        log_info "Restarting $component..."
-        "$AI_STUDIO_ROOT/components/$component/stop.sh" "${args[@]}"
-        sleep 2
-        "$AI_STUDIO_ROOT/components/$component/start.sh" "${args[@]}"
-        
+        if [[ "$component" == "all" ]]; then
+            log_info "Restarting all components..."
+            for comp in $(get_all_components); do
+                log_info "Restarting $comp..."
+                "$AI_STUDIO_ROOT/components/$comp/stop.sh" "$@"
+                sleep 2
+                "$AI_STUDIO_ROOT/components/$comp/start.sh" "$@"
+            done
+        else
+            log_info "Restarting $component..."
+            "$AI_STUDIO_ROOT/components/$component/stop.sh" "$@"
+            sleep 2
+            "$AI_STUDIO_ROOT/components/$component/start.sh" "$@"
+        fi
     elif [[ "$command" == "status" ]]; then
         if [[ -z "$component" ]] || [[ "$component" == "all" ]]; then
-            show_all_components_status
+            list_components # Fixed: was show_all_components_status
         else
-            "$script_path" "${args[@]}"
+            "$script_path" "$@"
         fi
-        
     elif [[ "$command" == "update" ]]; then
         if [[ "$component" == "all" ]]; then
             log_info "Updating all components..."
             for comp in $(get_all_components); do
                 log_info "Updating $comp..."
-                "$AI_STUDIO_ROOT/components/$comp/update.sh" "${args[@]}"
+                "$AI_STUDIO_ROOT/components/$comp/update.sh" "$@"
             done
         else
             log_info "Updating $component..."
-            "$script_path" "${args[@]}"
+            "$script_path" "$@"
         fi
-        
     elif [[ "$command" == "uninstall" ]]; then
         log_info "Uninstalling $component..."
-        "$script_path" "${args[@]}"
-        
+        "$script_path" "$@"
     elif [[ "$command" == "diagnose" ]]; then
         log_info "Diagnosing $component..."
-        "$script_path" "${args[@]}"
-        
+        "$script_path" "$@"
     else
         log_error "Unknown command: $command"
         exit 1
@@ -199,15 +201,14 @@ list_components() {
     echo ""
     echo "Available Components:"
     echo ""
-    
     for comp in $(get_all_components); do
-        local desc=$(get_component_description "$comp")
-        local port=$(get_component_port "$comp")
+        local desc
+        desc=$(get_component_description "$comp")
+        local port
+        port=$(get_component_port "$comp")
         local status_icon="[ ]"
         
-        # Check if installed
         if is_component_installed "$comp"; then
-            # Check if running
             if is_component_running "$comp"; then
                 status_icon="[R]"
             else
@@ -221,7 +222,6 @@ list_components() {
         fi
         echo ""
     done
-    
     echo ""
     echo "Status Legend:"
     echo "  [R] Running  [I] Installed but not running  [ ] Not installed"
@@ -229,8 +229,8 @@ list_components() {
 }
 
 main() {
-    # Initialize logging
-    init_logging
+    # CRITICAL FIX: Removed 'init_logging' call. 
+    # Log functions are ready immediately after sourcing lib/common.sh.
     
     # Check arguments
     if [[ $# -eq 0 ]]; then
