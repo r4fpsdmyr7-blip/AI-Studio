@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Run ShellCheck on all scripts
+        run: |
+          echo "Running ShellCheck..."
+          # Find all .sh files and run shellcheck
+          find . -name "*.sh" -type f -print0 | xargs -0 shellcheck
+          
+      - name: Run custom test suite
+        run: |
+          echo "Running custom test suite..."
+          chmod +x tests/run-shellcheck.sh
+          ./tests/run-shellcheck.sh
