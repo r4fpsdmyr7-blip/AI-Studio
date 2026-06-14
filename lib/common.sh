@@ -134,8 +134,22 @@ print_separator() {
 # 4. Initialization (Optional but recommended)
 # ============================================================================
 # Verify that this library is running on a supported OS
-if ! is_macos; then
-    log_error "AI Studio is currently designed for macOS only."
-    log_info "Detected OS: $OSTYPE"
-    exit 1
-fi
+check_platform_compatibility() {
+    if ! is_macos; then
+        log_error "AI Studio is currently optimized for macOS."
+        log_info "Detected OS: $OSTYPE"
+        
+        case "$OSTYPE" in
+            linux*)
+                log_warn "Linux support is experimental. Some features may not work."
+                log_info "Apple Silicon-specific components (MLX, MLX-Video) will be disabled."
+                return 0  # 允许继续但警告
+                ;;
+            *)
+                log_error "Unsupported platform. Please use macOS 13+ for full functionality."
+                return 1
+                ;;
+        esac
+    fi
+    return 0
+}
