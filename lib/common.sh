@@ -1,104 +1,141 @@
-#!/usr/bin/env bash
-# 不使用 set -e，避免静默退出；不使用 set -u，避免空数组报错
-set -o pipefail
-export AI_STUDIO_ROOT="${AI_STUDIO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-export AI_STUDIO_HOME="${AI_STUDIO_HOME:-$HOME/.ai-studio}"
-export AI_STUDIO_CONFIG_DIR="$AI_STUDIO_HOME/config"
-export AI_STUDIO_LOG_DIR="$AI_STUDIO_HOME/logs"
-export AI_STUDIO_RUN_DIR="$AI_STUDIO_HOME/run"
-export AI_STUDIO_DATA_DIR="$AI_STUDIO_HOME/data"
-export AI_STUDIO_LIB_DIR="$AI_STUDIO_ROOT/lib"
-export AI_STUDIO_COMPONENTS_DIR="$AI_STUDIO_ROOT/components"
-export AI_STUDIO_COMMANDS_DIR="$AI_STUDIO_ROOT/commands"
+#!/bin/bash
 
-init_dirs() { mkdir -p "$AI_STUDIO_CONFIG_DIR" "$AI_STUDIO_LOG_DIR" "$AI_STUDIO_RUN_DIR" "$AI_STUDIO_DATA_DIR"; }
+# ============================================================================
+# AI Studio - Common Library (lib/common.sh)
+# Provides universal tools, logging, colors, and helper functions.
+# This file should be sourced by the main script and other components.
+# ============================================================================
 
-if [[ -t 1 ]]; then
-    CLR_RED="\033[0;31m"; CLR_GREEN="\033[0;32m"; CLR_YELLOW="\033[0;33m"
-    CLR_BLUE="\033[0;34m"; CLR_CYAN="\033[0;36m"; CLR_BOLD="\033[1m"; CLR_DIM="\033[2m"; CLR_RESET="\033[0m"
-else
-    CLR_RED=""; CLR_GREEN=""; CLR_YELLOW=""; CLR_BLUE=""; CLR_CYAN=""; CLR_BOLD=""; CLR_DIM=""; CLR_RESET=""
-fi
+# Prevent unbound variable errors. 
+# Note: We intentionally avoid 'set -e' here to allow calling scripts to handle errors gracefully.
+set -u
 
-log_info()    { echo -e "${CLR_GREEN}[INFO]${CLR_RESET}  $*"; }
-log_warn()    { echo -e "${CLR_YELLOW}[WARN]${CLR_RESET}  $*"; }
-log_error()   { echo -e "${CLR_RED}[ERROR]${CLR_RESET} $*" >&2; }
-log_debug()   { [[ "${AI_STUDIO_DEBUG:-0}" == "1" ]] && echo -e "${CLR_DIM}[DEBUG]${CLR_RESET} $*"; }
-log_success() { echo -e "${CLR_GREEN}[OK]${CLR_RESET}    $*"; }
+# ============================================================================
+# 1. Color Definitions (ANSI Escape Codes)
+# ============================================================================
+readonly COLOR_RESET="\033[0m"
+readonly COLOR_BOLD="\033[1m"
+readonly COLOR_RED="\033[31m"
+readonly COLOR_GREEN="\033[32m"
+readonly COLOR_YELLOW="\033[33m"
+readonly COLOR_BLUE="\033[34m"
+readonly COLOR_CYAN="\033[36m"
+readonly COLOR_GRAY="\033[90m"
 
-detect_platform() {
-    case "$(uname -s)" in Darwin) export AI_STUDIO_OS="macos";; Linux) export AI_STUDIO_OS="linux";; *) log_error "不支持的OS"; return 1;; esac
-    case "$(uname -m)" in arm64|aarch64) export AI_STUDIO_ARCH="arm64";; x86_64) export AI_STUDIO_ARCH="x64";; *) log_error "不支持的架构"; return 1;; esac
+# ============================================================================
+# 2. Logging Functions (Progressive Disclosure: Debug is hidden by default)
+# ============================================================================
+
+# Usage: log_info "Message"
+log_info() {
+    echo -e "${COLOR_CYAN}[INFO]${COLOR_RESET} $1"
 }
-is_apple_silicon() { [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]]; }
-check_command() { command -v "$1" &>/dev/null; }
-require_command() { check_command "$1" || { log_error "缺少: $1 ${2:-}"; return 1; }; }
 
-is_port_free() { ! lsof -i ":$1" &>/dev/null 2>&1; }
-find_free_port() { for ((p=${1:-8000}; p<=${2:-9000}; p++)); do is_port_free "$p" && { echo "$p"; return 0; }; done; return 1; }
-
-save_pid() { echo "$2" > "$AI_STUDIO_RUN_DIR/${1}.pid"; }
-get_pid() { [[ -f "$AI_STUDIO_RUN_DIR/${1}.pid" ]] && cat "$AI_STUDIO_RUN_DIR/${1}.pid"; }
-is_running() {
-    local pid; pid="$(get_pid "$1")"
-    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && return 0
-    rm -f "$AI_STUDIO_RUN_DIR/${1}.pid"; return 1
+# Usage: log_success "Message"
+log_success() {
+    echo -e "${COLOR_GREEN}[SUCCESS]${COLOR_RESET} $1"
 }
-kill_service() {
-    local pid; pid="$(get_pid "$1")"
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-        kill "$pid" 2>/dev/null; local c=0
-        while kill -0 "$pid" 2>/dev/null && ((c<10)); do sleep 1; ((c++)); done
-        kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
-        log_info "已停止 $1 (PID: $pid)"
+
+# Usage: log_warn "Message"
+log_warn() {
+    echo -e "${COLOR_YELLOW}[WARN]${COLOR_RESET} $1"
+}
+
+# Usage: log_error "Message" (Outputs to stderr)
+log_error() {
+    echo -e "${COLOR_RED}[ERROR]${COLOR_RESET} $1" >&2
+}
+
+# Usage: log_debug "Message" (Only prints if AI_STUDIO_DEBUG=1 is set in environment)
+log_debug() {
+    if [[ "${AI_STUDIO_DEBUG:-0}" == "1" ]]; then
+        echo -e "${COLOR_GRAY}[DEBUG]${COLOR_RESET} $1"
     fi
-    rm -f "$AI_STUDIO_RUN_DIR/${1}.pid"
 }
 
-open_browser() {
-    local url="$1"
-    [[ "$AI_STUDIO_OS" == "macos" ]] && open "$url" 2>/dev/null &
-    [[ "$AI_STUDIO_OS" == "linux" ]] && xdg-open "$url" 2>/dev/null &
-    log_info "浏览器已打开: $url"
+# ============================================================================
+# 3. System & Environment Helper Functions
+# ============================================================================
+
+# Check if the current OS is macOS
+is_macos() {
+    [[ "$OSTYPE" == "darwin"* ]]
 }
 
-download_file() {
-    if check_command curl; then curl -fSL --progress-bar -o "$2" "$1"
-    elif check_command wget; then wget -q --show-progress -O "$2" "$1"
-    else log_error "需要 curl 或 wget"; return 1; fi
+# Check if the current hardware is Apple Silicon (M1/M2/M3/M4)
+is_apple_silicon() {
+    if is_macos; then
+        [[ "$(uname -m)" == "arm64" ]]
+    else
+        return 1
+    fi
 }
 
-wait_for_service() {
-    local url="$1" timeout="${2:-30}" name="${3:-service}" c=0
-    log_info "等待 $name 就绪 ($url)..."
-    while ((c < timeout)); do curl -sf "$url" &>/dev/null && { log_success "$name 已就绪"; return 0; }; sleep 1; ((c++)); done
-    log_warn "$name 启动超时 (${timeout}s)"; return 1
+# Check if a specific command exists in the PATH
+# Usage: if command_exists "brew"; then ...
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
 }
 
-confirm() {
-    local msg="${1:-确认?}" default="${2:-n}" prompt
-    [[ "$default" == "y" ]] && prompt="$msg [Y/n]: " || prompt="$msg [y/N]: "
-    echo -en "${CLR_CYAN}$prompt${CLR_RESET}"; read -r answer; answer="${answer:-$default}"; [[ "$answer" =~ ^[Yy] ]]
+# Check if a specific TCP port is currently in use (listening)
+# Usage: if is_port_in_use 8080; then ...
+is_port_in_use() {
+    local port=$1
+    # lsof returns 0 if the port is in use, 1 otherwise
+    lsof -i ":$port" >/dev/null 2>&1
 }
 
-handle_port_conflict() {
-    local port="$1" name="$2"
-    if ! is_port_free "$port"; then
-        log_warn "端口 $port 被占用 ($name)"
-        if confirm "终止占用进程?"; then
-            lsof -i ":$port" -t 2>/dev/null | xargs kill -9 2>/dev/null; sleep 1
-            is_port_free "$port" && { echo "$port"; return 0; }
+# Wait for a port to become available (listening), with a timeout
+# Usage: wait_for_port 8080 10 (wait up to 10 seconds)
+wait_for_port() {
+    local port=$1
+    local timeout=${2:-15} # Default timeout: 15 seconds
+    local elapsed=0
+
+    log_info "Waiting for service on port $port to be ready (timeout: ${timeout}s)..."
+    while ! is_port_in_use "$port"; do
+        if [[ $elapsed -ge $timeout ]]; then
+            log_warn "Timeout waiting for port $port to open."
+            return 1
         fi
-        local np; np="$(find_free_port $((port+1)) $((port+100)))"
-        [[ -n "$np" ]] && { log_info "替代端口: $np"; echo "$np"; return 0; }
-        log_error "无可用端口"; return 1
-    fi
-    echo "$port"
+        sleep 1
+        ((elapsed++))
+    done
+    log_success "Service on port $port is ready."
+    return 0
 }
 
-load_libs() {
-    init_dirs; detect_platform
-    for lib in logger ui network config component; do
-        [[ -f "$AI_STUDIO_LIB_DIR/${lib}.sh" ]] && source "$AI_STUDIO_LIB_DIR/${lib}.sh"
-    done
+# Require sudo privileges for the current operation, or exit with an error
+# Usage: require_sudo "$0" "$@"
+require_sudo() {
+    if [[ $EUID -ne 0 ]]; then
+        log_error "This operation requires administrator privileges."
+        log_info "Please run with sudo: sudo $*"
+        exit 1
+    fi
 }
+
+# Ensure a directory exists, creating it if necessary
+# Usage: ensure_dir "/path/to/dir"
+ensure_dir() {
+    local dir="$1"
+    if [[ ! -d "$dir" ]]; then
+        mkdir -p "$dir"
+        log_debug "Created directory: $dir"
+    fi
+}
+
+# Print a visual separator line for better CLI readability
+print_separator() {
+    echo -e "${COLOR_GRAY}================================================================================${COLOR_RESET}"
+}
+
+# ============================================================================
+# 4. Initialization (Optional but recommended)
+# ============================================================================
+# Verify that this library is running on a supported OS
+if ! is_macos; then
+    log_error "AI Studio is currently designed for macOS only."
+    log_info "Detected OS: $OSTYPE"
+    exit 1
+fi
