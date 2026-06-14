@@ -3,14 +3,7 @@
 # ============================================================================
 # AI Studio - Environment Install Library (lib/env-install.sh)
 # Automates the installation of system dependencies and AI toolchains.
-# 
-# CRITICAL FIX: Refactored to use standard if/then/else blocks instead of 
-# inline `|| { ... }` blocks to prevent any potential Bash parsing issues 
-# (unexpected EOF) across all macOS Bash versions.
 # ============================================================================
-
-# Ensure common functions are available
-# This script expects to be sourced after lib/common.sh
 
 # ============================================================================
 # 1. Installation Functions
@@ -21,12 +14,11 @@ install_homebrew() {
         log_info "Homebrew is already installed. Skipping."
         return 0
     fi
-
-    log_info "Installing Homebrew (this may take a few minutes and may prompt for your password)..."
+    log_info "Installing Homebrew (this may prompt for your password)..."
     
     /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
     if [ $? -ne 0 ]; then
-        log_error "Failed to install Homebrew. Please install it manually from https://brew.sh"
+        log_error "Failed to install Homebrew."
         return 1
     fi
 
@@ -35,15 +27,14 @@ install_homebrew() {
     else
         eval "$(/usr/local/bin/brew shellenv)"
     fi
-    
     log_success "Homebrew installed and configured successfully."
     return 0
 }
 
 install_basic_tools() {
-    log_info "Checking and installing basic command-line tools..."
+    log_info "Checking basic command-line tools..."
     local tools_to_install=""
-
+    
     for tool in git curl wget; do
         if ! command_exists "$tool"; then
             tools_to_install="$tools_to_install $tool"
@@ -61,13 +52,12 @@ install_basic_tools() {
         log_error "Failed to install basic tools via Homebrew."
         return 1
     fi
-
     log_success "Basic tools installed successfully."
     return 0
 }
 
 install_runtime_envs() {
-    log_info "Checking and installing runtime environments (Python, Node.js)..."
+    log_info "Checking runtime environments (Python, Node.js)..."
     
     if ! command_exists "python3"; then
         log_info "Installing Python 3..."
@@ -90,34 +80,23 @@ install_runtime_envs() {
     else
         log_info "Node.js is already installed."
     fi
-
     log_success "Runtime environments are ready."
     return 0
 }
 
 install_ai_tools() {
-    log_info "Checking and installing AI core tools..."
-
+    log_info "Checking AI core tools..."
     if ! command_exists "ollama"; then
         log_info "Installing Ollama (required for local LLM execution)..."
         curl -fsSL https://ollama.com/install.sh | sh
         if [ $? -ne 0 ]; then
-            log_error "Failed to install Ollama. Please install it manually from https://ollama.com"
+            log_error "Failed to install Ollama."
             return 1
         fi
         log_success "Ollama installed successfully."
     else
         log_info "Ollama is already installed."
     fi
-
-    if is_apple_silicon; then
-        if ! pgrep oahd >/dev/null; then
-            log_info "Installing Rosetta 2 for compatibility with x86_64 binaries..."
-            softwareupdate --install-rosetta --agree-to-license >/dev/null 2>&1
-            log_success "Rosetta 2 installed."
-        fi
-    fi
-
     return 0
 }
 
@@ -128,41 +107,30 @@ install_ai_tools() {
 install_all_dependencies() {
     print_separator
     log_info "Starting AI Studio Environment Installation..."
-    log_warn "This process may require your administrator password and will download several gigabytes of data."
+    log_warn "This process may require your administrator password."
     print_separator
 
     local failed_steps=0
 
     install_homebrew
-    if [ $? -ne 0 ]; then
-        failed_steps=$((failed_steps + 1))
-    fi
+    if [ $? -ne 0 ]; then failed_steps=$((failed_steps + 1)); fi
     
     install_basic_tools
-    if [ $? -ne 0 ]; then
-        failed_steps=$((failed_steps + 1))
-    fi
+    if [ $? -ne 0 ]; then failed_steps=$((failed_steps + 1)); fi
     
     install_runtime_envs
-    if [ $? -ne 0 ]; then
-        failed_steps=$((failed_steps + 1))
-    fi
+    if [ $? -ne 0 ]; then failed_steps=$((failed_steps + 1)); fi
     
     install_ai_tools
-    if [ $? -ne 0 ]; then
-        failed_steps=$((failed_steps + 1))
-    fi
+    if [ $? -ne 0 ]; then failed_steps=$((failed_steps + 1)); fi
 
     print_separator
-
     if [ "$failed_steps" -eq 0 ]; then
         log_success "Environment installation completed successfully!"
         log_info "Your system is now fully prepared for AI Studio."
-        log_info "You can now run './ai-studio.sh install <component>' to deploy your first AI tool."
         return 0
     else
         log_error "Environment installation encountered $failed_steps error(s)."
-        log_info "Please review the errors above. You may need to install some components manually or resolve network issues."
         return 1
     fi
 }
