@@ -1,146 +1,203 @@
-#!/usr/bin/env bash
-# =============================================================================
-# 配置管理 (兼容 Bash 3.2，不使用 declare -A)
-# =============================================================================
+#!/bin/bash
 
-# 用普通变量存储默认值
-_cfg_default_GLOBAL_AUTO_OPEN_BROWSER="true"
-_cfg_default_GLOBAL_LOG_LEVEL="1"
-_cfg_default_GLOBAL_PROXY=""
-_cfg_default_GLOBAL_HF_MIRROR="https://hf-mirror.com"
-_cfg_default_GLOBAL_PIP_MIRROR="https://pypi.tuna.tsinghua.edu.cn/simple"
-_cfg_default_GLOBAL_NPM_MIRROR="https://registry.npmmirror.com"
-_cfg_default_GLOBAL_GH_PROXY=""
-_cfg_default_OPEN_WEBUI_PORT="3000"
-_cfg_default_SILLYTAVERN_PORT="8000"
-_cfg_default_COMFYUI_PORT="8188"
-_cfg_default_MLX_VIDEO_PORT="7860"
-_cfg_default_BROWSER_USE_PORT="9222"
-_cfg_default_FAZM_PORT="8501"
-_cfg_default_OLLAMA_HOST="http://localhost:11434"
+# ============================================================================
+# AI Studio - Configuration Library (lib/config.sh)
+# Manages global and component-specific configurations.
+# Uses a simple, robust KEY="VALUE" format for persistence.
+# ============================================================================
 
-# 运行时配置存储（用 _cfg_VAL_<KEY> 变量）
-_cfg_get_default() {
-    local key="$1"
-    local var="_cfg_default_${key}"
-    echo "${!var:-}"
+# Ensure common functions (like logging) are available
+# This script expects to be sourced after lib/common.sh
+
+# ============================================================================
+# 1. Configuration Paths & Defaults
+# ============================================================================
+
+# Base configuration directory (relative to AI_STUDIO_ROOT)
+readonly AI_STUDIO_CONFIG_DIR="${AI_STUDIO_ROOT:-.}/config"
+readonly AI_STUDIO_GLOBAL_CONFIG="${AI_STUDIO_CONFIG_DIR}/global.conf"
+
+# Default configuration values (used if not explicitly set)
+declare -A DEFAULT_GLOBAL_CONFIG=(
+    ["AUTO_OPEN_BROWSER"]="true"
+    ["DEFAULT_PORT_OFFSET"]="0"
+    ["LOG_LEVEL"]="info"
+    ["MAX_DIAGNOSE_DEPTH"]="1"
+)
+
+# ============================================================================
+# 2. Initialization
+# ============================================================================
+
+# Initialize configuration directory and files
+# Usage: init_config
+init_config() {
+    ensure_dir "$AI_STUDIO_CONFIG_DIR"
+    
+    # Create global config if it doesn't exist
+    if [[ ! -f "$AI_STUDIO_GLOBAL_CONFIG" ]]; then
+        log_debug "Initializing global configuration file..."
+        touch "$AI_STUDIO_GLOBAL_CONFIG"
+        # Apply defaults
+        for key in "${!DEFAULT_GLOBAL_CONFIG[@]}"; do
+            set_config "$key" "${DEFAULT_GLOBAL_CONFIG[$key]}" "global"
+        done
+    fi
 }
 
-load_config() {
-    local f="$AI_STUDIO_CONFIG_DIR/global.conf"
-    [[ -f "$f" ]] || return 0
-    while IFS='=' read -r k v; do
-        [[ "$k" =~ ^[[:space:]]*# || -z "$k" ]] && continue
-        k="$(echo "$k" | xargs)"
-        v="$(echo "$v" | xargs | sed 's/^"//;s/"$//')"
-        [[ -z "$k" ]] && continue
-        # 存储到运行时变量
-        eval "_cfg_VAL_${k}=\"\${v}\""
-    done < "$f"
+# ============================================================================
+# 3. Core Configuration Operations
+# ============================================================================
+
+# Get the file path for a specific component's config
+# Usage: _get_component_config_file "open-webui"
+_get_component_config_file() {
+    local component="$1"
+    echo "${AI_STUDIO_CONFIG_DIR}/${component}.conf"
 }
 
+# Read a configuration value
+# Usage: value=$(get_config "KEY" ["component_name"])
+# If component_name is omitted or "global", it reads from global.conf
 get_config() {
     local key="$1"
-    local default_val="${2:-}"
-    # 优先从运行时变量获取
-    local var="_cfg_VAL_${key}"
-    local val="${!var:-}"
-    if [[ -n "$val" ]]; then
-        echo "$val"
-        return
-    fi
-    # 其次从默认值获取
-    val="$(_cfg_get_default "$key")"
-    if [[ -n "$val" ]]; then
-        echo "$val"
-        return
-    fi
-    echo "$default_val"
-}
+    local target="${2:-global}"
+    local config_file
 
-set_config() {
-    local key="$1" value="$2"
-    local f="$AI_STUDIO_CONFIG_DIR/global.conf"
-    mkdir -p "$(dirname "$f")"
-    # 更新运行时变量
-    eval "_cfg_VAL_${key}=\"\${value}\""
-    # 更新文件
-    if [[ -f "$f" ]] && grep -q "^${key}=" "$f" 2>/dev/null; then
-        # macOS 的 sed 需要 -i '' 格式
-        sed -i '' "s|^${key}=.*|${key}=${value}|" "$f" 2>/dev/null || \
-        sed -i.bak "s|^${key}=.*|${key}=${value}|" "$f" && rm -f "${f}.bak"
+    if [[ "$target" == "global" ]]; then
+        config_file="$AI_STUDIO_GLOBAL_CONFIG"
     else
-        echo "${key}=${value}" >> "$f"
+        config_file="$(_get_component_config_file "$target")"
     fi
-}
 
-init_config() {
-    local f="$AI_STUDIO_CONFIG_DIR/global.conf"
-    mkdir -p "$(dirname "$f")"
-    if [[ ! -f "$f" ]]; then
-        {
-            echo "# AI-Studio Config - $(date)"
-            echo "# Generated automatically"
+    if [[ ! -f "$config_file" ]]; then
+        # Fallback to default if file doesn't exist and it's a global key
+        if [[ "$target" == "global" ]] && [[ -n "${DEFAULT_GLOBAL_CONFIG[$key]:-}" ]]; then
+            echo "${DEFAULT_GLOBAL_CONFIG[$key]}"
+        else
             echo ""
-            for key in \
-                GLOBAL_AUTO_OPEN_BROWSER GLOBAL_LOG_LEVEL GLOBAL_PROXY \
-                GLOBAL_HF_MIRROR GLOBAL_PIP_MIRROR GLOBAL_NPM_MIRROR GLOBAL_GH_PROXY \
-                OPEN_WEBUI_PORT SILLYTAVERN_PORT COMFYUI_PORT \
-                MLX_VIDEO_PORT BROWSER_USE_PORT FAZM_PORT OLLAMA_HOST; do
-                local val
-                val="$(_cfg_get_default "$key")"
-                echo "${key}=${val}"
-            done
-        } > "$f"
-        log_info "已生成默认配置: $f"
-    fi
-    load_config
-}
-
-get_comp_config() {
-    local comp="$1" key="$2" default_val="${3:-}"
-    local f="$AI_STUDIO_CONFIG_DIR/${comp}.conf"
-    if [[ -f "$f" ]]; then
-        local v
-        v="$(grep "^${key}=" "$f" 2>/dev/null | head -1 | cut -d= -f2-)"
-        if [[ -n "$v" ]]; then
-            echo "$v"
-            return
         fi
+        return 0
     fi
-    # 回退到全局配置
-    get_config "${comp}_${key}" "$default_val"
-}
 
-set_comp_config() {
-    local comp="$1" key="$2" value="$3"
-    local f="$AI_STUDIO_CONFIG_DIR/${comp}.conf"
-    mkdir -p "$(dirname "$f")"
-    if [[ -f "$f" ]] && grep -q "^${key}=" "$f" 2>/dev/null; then
-        sed -i '' "s|^${key}=.*|${key}=${value}|" "$f" 2>/dev/null || \
-        sed -i.bak "s|^${key}=.*|${key}=${value}|" "$f" && rm -f "${f}.bak"
+    # Safely extract value: match ^KEY=, remove KEY=, remove surrounding quotes
+    local value
+    value=$(grep -E "^${key}=" "$config_file" 2>/dev/null | tail -n 1 | cut -d'=' -f2- | sed -e 's/^"//' -e 's/"$//')
+    
+    # If not found in file, check defaults (for global)
+    if [[ -z "$value" ]] && [[ "$target" == "global" ]] && [[ -n "${DEFAULT_GLOBAL_CONFIG[$key]:-}" ]]; then
+        echo "${DEFAULT_GLOBAL_CONFIG[$key]}"
     else
-        echo "${key}=${value}" >> "$f"
+        echo "$value"
     fi
 }
 
-show_config() {
-    local comp="${1:-}"
-    local f="${comp:+$AI_STUDIO_CONFIG_DIR/${comp}.conf}"
-    f="${f:-$AI_STUDIO_CONFIG_DIR/global.conf}"
-    info_box "配置: ${comp:-global}"
-    if [[ -f "$f" ]]; then
-        cat "$f" | grep -v '^#' | grep '=' | while IFS='=' read -r k v; do
-            [[ -n "$k" ]] && printf "    %-25s = %s\n" "$k" "$v"
-        done
+# Write or update a configuration value
+# Usage: set_config "KEY" "VALUE" ["component_name"]
+set_config() {
+    local key="$1"
+    local value="$2"
+    local target="${3:-global}"
+    local config_file
+
+    if [[ "$target" == "global" ]]; then
+        config_file="$AI_STUDIO_GLOBAL_CONFIG"
     else
-        echo "    (配置文件不存在)"
+        config_file="$(_get_component_config_file "$target")"
+        ensure_dir "$AI_STUDIO_CONFIG_DIR"
+        touch "$config_file" # Create if not exists
+    fi
+
+    # Validate key (alphanumeric and underscores only)
+    if [[ ! "$key" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+        log_error "Invalid configuration key: $key"
+        return 1
+    fi
+
+    # Escape double quotes in value for safe storage
+    local escaped_value="${value//\"/\\\"}"
+
+    # Check if key already exists
+    if grep -qE "^${key}=" "$config_file" 2>/dev/null; then
+        # macOS (BSD) sed requires an empty string for -i ''
+        # Update existing key
+        sed -i '' "s|^${key}=.*|${key}=\"${escaped_value}\"|" "$config_file"
+        log_debug "Updated config: $key in $target"
+    else
+        # Append new key
+        echo "${key}=\"${escaped_value}\"" >> "$config_file"
+        log_debug "Added config: $key in $target"
     fi
 }
 
-reset_config() {
-    local comp="${1:-global}"
-    rm -f "$AI_STUDIO_CONFIG_DIR/${comp}.conf"
-    [[ "$comp" == "global" ]] && init_config
-    log_info "已重置配置: $comp"
+# Delete a configuration value
+# Usage: delete_config "KEY" ["component_name"]
+delete_config() {
+    local key="$1"
+    local target="${2:-global}"
+    local config_file
+
+    if [[ "$target" == "global" ]]; then
+        config_file="$AI_STUDIO_GLOBAL_CONFIG"
+    else
+        config_file="$(_get_component_config_file "$target")"
+    fi
+
+    if [[ ! -f "$config_file" ]]; then
+        return 0
+    fi
+
+    # Remove the line matching the key
+    sed -i '' "/^${key}=/d" "$config_file"
+    log_debug "Deleted config: $key from $target"
 }
+
+# ============================================================================
+# 4. Helper / Convenience Functions
+# ============================================================================
+
+# Check if a boolean config is true
+# Usage: if is_config_true "AUTO_OPEN_BROWSER"; then ...
+is_config_true() {
+    local key="$1"
+    local target="${2:-global}"
+    local value
+    value=$(get_config "$key" "$target")
+    
+    # Convert to lowercase for comparison
+    local lower_value="${value,,}"
+    [[ "$lower_value" == "true" || "$lower_value" == "1" || "$lower_value" == "yes" ]]
+}
+
+# Load all configurations for a specific component into the current shell environment
+# WARNING: Only use this if you trust the config file contents.
+# Usage: load_component_env "open-webui"
+load_component_env() {
+    local component="$1"
+    local config_file="$(_get_component_config_file "$component")"
+    
+    if [[ -f "$config_file" ]]; then
+        # Source the file safely (it only contains KEY="VALUE" pairs)
+        # shellcheck disable=SC1090
+        source "$config_file"
+        log_debug "Loaded environment variables for $component"
+    fi
+}
+
+# Reset a component's configuration to defaults (by deleting the file)
+# Usage: reset_component_config "open-webui"
+reset_component_config() {
+    local component="$1"
+    local config_file="$(_get_component_config_file "$component")"
+    
+    if [[ -f "$config_file" ]]; then
+        rm -f "$config_file"
+        log_info "Reset configuration for $component"
+    fi
+}
+
+# ============================================================================
+# 5. Auto-initialization
+# ============================================================================
+# Automatically ensure config directory exists when this library is sourced
+init_config
