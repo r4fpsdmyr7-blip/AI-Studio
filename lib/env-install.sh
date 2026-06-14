@@ -96,35 +96,6 @@ install_runtime_envs() {
     return 0
 }
 
-# Install AI-specific core tools (Ollama)
-install_ai_tools() {
-    log_info "Checking and installing AI core tools..."
-
-    # Install Ollama
-    if ! command_exists "ollama"; then
-        log_info "Installing Ollama (required for local LLM execution)..."
-        # Official Ollama macOS installation script
-        curl -fsSL https://ollama.com/install.sh | sh || {
-            log_error "Failed to install Ollama. Please install it manually from https://ollama.com"
-            return 1
-        }
-        log_success "Ollama installed successfully."
-    else
-        log_info "Ollama is already installed."
-    fi
-
-    # Optional: Ensure Rosetta 2 is installed on Apple Silicon (required for some x86_64 binaries)
-    if is_apple_silicon; then
-        if ! pgrep oahd >/dev/null; then
-            log_info "Installing Rosetta 2 for compatibility with x86_64 binaries..."
-            softwareupdate --install-rosetta --agree-to-license >/dev/null 2>&1
-            log_success "Rosetta 2 installed."
-        fi
-    fi
-
-    return 0
-}
-
 # ============================================================================
 # 2. Aggregated Installation Function
 # ============================================================================
